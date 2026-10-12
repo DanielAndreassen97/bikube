@@ -1,0 +1,14 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # job id is the required status check in the develop/main rulesets; don't rename it.
+  # v1 adds the stack's setup steps (runtime, dependencies) before the check.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: .claude/check.sh
