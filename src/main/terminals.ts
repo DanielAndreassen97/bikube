@@ -1,13 +1,16 @@
 import { ipcMain, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from 'electron'
-import { isSessionId, isValidSize, isWriteData } from '../core/ipc-guards'
+import { isCurrentMainFrame, isSessionId, isValidSize, isWriteData } from '../core/ipc-guards'
+import { PageGenerations } from '../core/page-generations'
 import { SessionManager } from '../core/session-manager'
 import { SessionOwners } from '../core/session-owners'
+import { spawnInDirectory } from '../core/terminal-spawn'
 import { IPC, type TerminalExit } from '../shared/api'
 
 /** Wires the session manager to IPC. Sessions stream to the window that spawned them. */
 export function registerTerminals(): SessionManager {
   const manager = new SessionManager()
   const owners = new SessionOwners<WebContents>()
+  const pages = new PageGenerations<WebContents>()
 
   manager.on('data', (id, data) => {
     const owner = owners.ownerOf(id)
@@ -27,23 +30,45 @@ export function registerTerminals(): SessionManager {
   const ownedBy = (event: IpcMainEvent, id: unknown): id is string =>
     fromMainFrame(event) && isSessionId(id) && owners.ownerOf(id) === event.sender
 
-  // Hooked once per window, not per session: a window's shells end with its page.
+  // Hooked once per window, on its first spawn request: a window's shells end with its page.
   const watch = (owner: WebContents): void => {
     const killAll = (): void => owners.sessionsOf(owner).forEach((id) => manager.kill(id))
-    owner.once('destroyed', () => owners.release(owner).forEach((id) => manager.kill(id)))
-    // A reload or crash leaves the old page's shells with no UI to drive them.
-    owner.on('did-start-navigation', (details) => {
-      if (details.isMainFrame && !details.isSameDocument) killAll()
+    owner.once('destroyed', () => {
+      pages.release(owner)
+      owners.release(owner).forEach((id) => manager.kill(id))
     })
-    owner.on('render-process-gone', killAll)
+    // A reload or crash leaves the old page's shells with no UI to drive them; a spawn still
+    // checking its directory for the old page must not start one either. Only a committed
+    // main-frame navigation counts: one the navigation lock cancels starts but never commits.
+    owner.on('did-navigate', () => {
+      pages.bump(owner)
+      killAll()
+    })
+    owner.on('render-process-gone', () => {
+      pages.bump(owner)
+      killAll()
+    })
   }
 
-  ipcMain.handle(IPC.spawn, (event, cols: unknown, rows: unknown) => {
+  ipcMain.handle(IPC.spawn, async (event, cols: unknown, rows: unknown, cwd: unknown) => {
     if (!fromMainFrame(event)) throw new Error('terminal:spawn rejected: untrusted sender')
-    if (!isValidSize(cols, rows)) throw new Error('terminal:spawn rejected: invalid size')
-    const { id } = manager.spawn({ cols: cols as number, rows: rows as number })
-    if (owners.add(event.sender, id)) watch(event.sender)
-    return id
+    const owner = event.sender
+    if (pages.track(owner)) watch(owner)
+    const samePage = pages.snapshot(owner)
+    // Re-checked after the directory check: no spawn for a page that reloaded or closed meanwhile.
+    // The frame check catches an old page's request that main only handled after the reload.
+    const result = await spawnInDirectory(
+      { cols, rows, cwd },
+      (options) => manager.spawn(options),
+      {
+        stillCurrent: () =>
+          samePage() &&
+          !owner.isDestroyed() &&
+          isCurrentMainFrame(event.senderFrame, owner.mainFrame)
+      }
+    )
+    if (result.ok) owners.add(owner, result.id)
+    return result
   })
   ipcMain.on(IPC.write, (event, id: unknown, data: unknown) => {
     if (ownedBy(event, id) && isWriteData(data)) manager.write(id, data)

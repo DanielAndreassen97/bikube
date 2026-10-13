@@ -1,10 +1,16 @@
-import { describe, expect, it } from 'vitest'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
   MAX_WRITE_BYTES,
+  SPAWN_REFUSAL,
   isClipboardText,
+  isCurrentMainFrame,
   isSessionId,
   isValidSize,
-  isWriteData
+  isWriteData,
+  workingDirectoryProblem
 } from './ipc-guards'
 
 describe('isValidSize', () => {
@@ -77,5 +83,55 @@ describe('isClipboardText', () => {
     expect(isClipboardText(null)).toBe(false)
     expect(isClipboardText('x'.repeat(MAX_WRITE_BYTES + 1))).toBe(false)
     expect(isClipboardText('€'.repeat(MAX_WRITE_BYTES / 2))).toBe(false)
+  })
+})
+
+describe('workingDirectoryProblem', () => {
+  let dir: string
+  let file: string
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'drovr-cwd-'))
+    file = join(dir, 'file.txt')
+    await writeFile(file, 'x')
+  })
+
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('accepts an existing absolute directory', async () => {
+    expect(await workingDirectoryProblem(dir)).toBeNull()
+  })
+
+  it('reports a missing directory as not found', async () => {
+    expect(await workingDirectoryProblem(join(dir, 'gone'))).toBe('working directory not found')
+    expect(SPAWN_REFUSAL.directoryNotFound).toBe('working directory not found')
+  })
+
+  it('reports a file in place of the directory as not found', async () => {
+    expect(await workingDirectoryProblem(file)).toBe(SPAWN_REFUSAL.directoryNotFound)
+  })
+
+  it('reports non-strings, relative and malformed paths as invalid', async () => {
+    for (const cwd of [undefined, null, 42, '', 'relative/dir', '~', '/tmp/a\0b']) {
+      expect(await workingDirectoryProblem(cwd)).toBe(SPAWN_REFUSAL.invalidDirectory)
+    }
+  })
+})
+
+describe('isCurrentMainFrame', () => {
+  const main = { processId: 4, routingId: 1, detached: false }
+
+  it('accepts the live main frame, by identity or by process and routing id', () => {
+    expect(isCurrentMainFrame(main, main)).toBe(true)
+    expect(isCurrentMainFrame({ processId: 4, routingId: 1, detached: false }, main)).toBe(true)
+  })
+
+  it('refuses a missing, detached or other frame', () => {
+    expect(isCurrentMainFrame(null, main)).toBe(false)
+    expect(isCurrentMainFrame({ ...main, detached: true }, main)).toBe(false)
+    expect(isCurrentMainFrame({ processId: 5, routingId: 1, detached: false }, main)).toBe(false)
+    expect(isCurrentMainFrame({ processId: 4, routingId: 2, detached: false }, main)).toBe(false)
   })
 })

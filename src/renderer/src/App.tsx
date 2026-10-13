@@ -1,4 +1,9 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
+import { workspaceDeleteMessage } from '../../core/card-deletes'
+import type { Workspace } from '../../core/workspace-store'
+import { removeWorkspace } from './card-actions'
+import { useRunningCount } from './card-terminals'
+import CardView from './CardView'
 import ConfirmDialog from './ConfirmDialog'
 import WorkspaceDialog from './WorkspaceDialog'
 import Board from './Board'
@@ -10,6 +15,22 @@ function App(): React.JSX.Element {
   const { workspaces, activeId } = useWorkspaceState()
   const [collapsed, setCollapsed] = useState(false)
   const active = workspaces.find((w) => w.id === activeId) ?? null
+  // One card open at full size at a time, always one of the active workspace's (#4 D7). It is
+  // tied to the workspace it was opened in and dropped as soon as another one is active, however
+  // the switch happened (sidebar, workspace created or deleted), so it never reopens later (D8).
+  const [opened, setOpened] = useState<{ workspaceId: string; cardId: string } | null>(null)
+  const openCard =
+    opened?.workspaceId === activeId
+      ? (active?.cards.find((c) => c.id === opened.cardId) ?? null)
+      : null
+  const closeCard = useCallback(() => setOpened(null), [setOpened])
+  const onOpenCard = useCallback(
+    (cardId: string) => {
+      if (activeId) setOpened({ workspaceId: activeId, cardId })
+    },
+    [activeId, setOpened]
+  )
+  if (opened && opened.workspaceId !== activeId) setOpened(null)
   const darwin = window.drovr?.platform === 'darwin'
 
   const [dialog, setDialog] = useState<
@@ -26,14 +47,20 @@ function App(): React.JSX.Element {
         activeId={activeId}
         collapsed={collapsed}
         onToggle={() => setCollapsed((c) => !c)}
-        onSelect={(id) => workspaceStore.selectWorkspace(id)}
+        onSelect={(id) => {
+          // Selecting a workspace shows its board, leaving any open card (#4 D8).
+          setOpened(null)
+          workspaceStore.selectWorkspace(id)
+        }}
         onAdd={onCreateWorkspace}
         onEdit={(id) => setDialog({ kind: 'edit', id })}
         onDelete={(id) => setDialog({ kind: 'delete', id })}
       />
       <main className="main">
-        {active ? (
-          <Board key={active.id} workspace={active} />
+        {active && openCard ? (
+          <CardView key={openCard.id} card={openCard} onBack={closeCard} />
+        ) : active ? (
+          <Board key={active.id} workspace={active} onOpenCard={onOpenCard} />
         ) : (
           <EmptyState onCreateWorkspace={onCreateWorkspace} />
         )}
@@ -49,18 +76,38 @@ function App(): React.JSX.Element {
         />
       )}
       {dialog?.kind === 'delete' && target && (
-        <ConfirmDialog
-          title="Delete workspace"
-          message={`Delete "${target.name}"? This removes its board.`}
-          confirmLabel="Delete"
+        <DeleteWorkspaceDialog
+          workspace={target}
           onCancel={() => setDialog(null)}
           onConfirm={() => {
-            workspaceStore.deleteWorkspace(target.id)
+            removeWorkspace(target)
             setDialog(null)
           }}
         />
       )}
     </div>
+  )
+}
+
+/** The workspace delete confirmation; its running count follows cards that exit meanwhile (D15). */
+function DeleteWorkspaceDialog({
+  workspace,
+  onConfirm,
+  onCancel
+}: {
+  workspace: Workspace
+  onConfirm: () => void
+  onCancel: () => void
+}): React.JSX.Element {
+  const running = useRunningCount(workspace.cards)
+  return (
+    <ConfirmDialog
+      title="Delete workspace"
+      message={workspaceDeleteMessage(workspace.name, running)}
+      confirmLabel="Delete"
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+    />
   )
 }
 

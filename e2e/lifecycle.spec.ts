@@ -46,11 +46,16 @@ const alive = (pid: number): boolean => {
 
 /** Spawns a shell through the bridge and returns its pid, read back from a file it writes. */
 async function spawnShell(): Promise<number> {
-  const file = join(mkdtempSync(join(tmpdir(), 'drovr-pid-')), 'pid')
-  await page.evaluate(async (path) => {
-    const id = await window.drovr.terminal.spawn(80, 24)
-    window.drovr.terminal.write(id, `echo $$ > '${path}'\r`)
-  }, file)
+  const dir = mkdtempSync(join(tmpdir(), 'drovr-pid-'))
+  const file = join(dir, 'pid')
+  await page.evaluate(
+    async ({ dir, path }) => {
+      const result = await window.drovr.terminal.spawn(80, 24, dir)
+      if (!result.ok) throw new Error(result.reason)
+      window.drovr.terminal.write(result.id, `echo $$ > '${path}'\r`)
+    },
+    { dir, path: file }
+  )
   await expect.poll(() => existsSync(file) && readFileSync(file, 'utf8').trim() !== '').toBe(true)
   return Number(readFileSync(file, 'utf8').trim())
 }
@@ -77,12 +82,39 @@ test('reloading the page kills its shells', async () => {
 })
 
 test('many shells in one window add no listener per session', async () => {
-  await page.evaluate(async () => {
-    const ids = await Promise.all(
-      Array.from({ length: 12 }, () => window.drovr.terminal.spawn(80, 24))
+  await page.evaluate(async (cwd) => {
+    const results = await Promise.all(
+      Array.from({ length: 12 }, () => window.drovr.terminal.spawn(80, 24, cwd))
     )
-    ids.forEach((id) => window.drovr.terminal.kill(id))
-  })
+    results.forEach((result) => result.ok && window.drovr.terminal.kill(result.id))
+  }, tmpdir())
   await page.waitForTimeout(500)
   expect(stderr).not.toContain('MaxListenersExceededWarning')
+})
+
+test('a blocked navigation leaves the shells running', async () => {
+  const pid = await spawnShell()
+  // Chromium starts these navigations (did-start-navigation) before the lock cancels them.
+  for (const url of ['file:///tmp/', 'https://example.com/']) {
+    await page.evaluate((url) => {
+      location.href = url
+    }, url)
+    await page.waitForTimeout(500)
+  }
+  expect(page.url()).toMatch(/index\.html$/)
+  expect(alive(pid)).toBe(true)
+  // The page is still the same load: a new spawn is accepted.
+  expect(alive(await spawnShell())).toBe(true)
+})
+
+test('a crashed renderer kills its shells', async () => {
+  const pid = await spawnShell()
+  expect(alive(pid)).toBe(true)
+  // Kill the renderer process outright: on Linux forcefullyCrashRenderer() only asks the renderer
+  // to crash itself over IPC, which can leave it hung instead of gone.
+  const renderer = await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].webContents.getOSProcessId()
+  )
+  process.kill(renderer, 'SIGKILL')
+  await expect.poll(() => alive(pid)).toBe(false)
 })

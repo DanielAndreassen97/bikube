@@ -1,5 +1,7 @@
 /** Runtime checks for IPC arguments: the renderer is not trusted, types alone do not hold at runtime. */
 
+import { isDirectory, isPathArg, type StatFs } from './directories'
+
 export const MAX_DIMENSION = 1000
 export const MAX_WRITE_BYTES = 1024 * 1024
 
@@ -23,5 +25,44 @@ export function isWriteData(data: unknown): data is string {
   )
 }
 
+/** The parts of an Electron frame that tell one frame from another. */
+export interface FrameIdentity {
+  readonly processId: number
+  readonly routingId: number
+  readonly detached: boolean
+}
+
+/**
+ * Whether `frame` (an IPC sender's frame) is still the window's live main frame. A request from
+ * a page that has been replaced must not act for the page that replaced it (#4 D16).
+ */
+export function isCurrentMainFrame(
+  frame: FrameIdentity | null | undefined,
+  mainFrame: FrameIdentity
+): boolean {
+  return (
+    frame != null &&
+    !frame.detached &&
+    frame.processId === mainFrame.processId &&
+    frame.routingId === mainFrame.routingId
+  )
+}
+
 /** Clipboard text shares the write cap: it ends up in a PTY when pasted. */
 export const isClipboardText = isWriteData
+
+/** Why main refused `terminal:spawn`; the renderer shows it after "Couldn't start: " (#4 D3). */
+export const SPAWN_REFUSAL = {
+  invalidSize: 'invalid terminal size',
+  invalidDirectory: 'invalid working directory',
+  directoryNotFound: 'working directory not found'
+} as const
+
+/** Null when `cwd` is an absolute path to an existing directory, else the refusal reason. */
+export async function workingDirectoryProblem(
+  cwd: unknown,
+  fsImpl?: StatFs
+): Promise<string | null> {
+  if (!isPathArg(cwd)) return SPAWN_REFUSAL.invalidDirectory
+  return (await isDirectory(cwd, fsImpl)) ? null : SPAWN_REFUSAL.directoryNotFound
+}
