@@ -1,3 +1,4 @@
+import { keyMoveTarget, type CardMoveDirection } from '../../core/card-moves'
 import type { Workspace } from '../../core/workspace-store'
 import { cardTerminals } from './card-terminals'
 import { workspaceStore } from './store'
@@ -27,4 +28,43 @@ export function removeCard(workspaceId: string, cardId: string): void {
 export function removeWorkspace(workspace: Workspace): void {
   workspace.cards.forEach((card) => cardTerminals().dispose(card.id))
   workspaceStore.deleteWorkspace(workspace.id)
+}
+
+/** The card whose open button takes focus at its next render, after a keyboard or menu move. */
+let focusAfterMove: string | null = null
+
+/**
+ * Moves a card one step with the keyboard (#6 D7); at an end nothing happens. Returns whether
+ * it moved; the moved card then takes focus back (see `takeFocusAfterMove`).
+ */
+export function moveCardByKey(
+  workspaceId: string,
+  cardId: string,
+  direction: CardMoveDirection
+): boolean {
+  const workspace = workspaceStore.getState().workspaces.find((w) => w.id === workspaceId)
+  const target = workspace && keyMoveTarget(workspace, cardId, direction)
+  if (!target) return false
+  focusAfterMove = cardId
+  const moved = workspaceStore.moveCard(workspaceId, cardId, target.columnId, target.index).ok
+  if (!moved) focusAfterMove = null
+  return moved
+}
+
+/**
+ * Moves a card to the bottom of another column from its menu (#6 D8). The card remounts
+ * there and takes focus back (see `takeFocusAfterMove`).
+ */
+export function moveCardToColumn(workspaceId: string, cardId: string, columnId: string): boolean {
+  focusAfterMove = cardId
+  const moved = workspaceStore.moveCard(workspaceId, cardId, columnId, Number.POSITIVE_INFINITY).ok
+  if (!moved) focusAfterMove = null
+  return moved
+}
+
+/** True once for the card that was just moved by keyboard or menu, so it can refocus itself. */
+export function takeFocusAfterMove(cardId: string): boolean {
+  if (focusAfterMove !== cardId) return false
+  focusAfterMove = null
+  return true
 }
