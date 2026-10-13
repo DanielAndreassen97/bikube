@@ -2,6 +2,7 @@ import { app, BrowserWindow } from 'electron'
 import { join } from 'node:path'
 import { registerClipboard } from './clipboard'
 import { registerDirectories } from './directories'
+import { registerState } from './state'
 import { registerTerminals } from './terminals'
 
 function createWindow(): void {
@@ -28,27 +29,58 @@ function createWindow(): void {
   }
 }
 
-const terminals = registerTerminals()
-registerClipboard()
-registerDirectories()
+// Smoke tests give each launch its own data directory (#8 D11); must be set before ready.
+const userDataDir = process.env['DROVR_USER_DATA_DIR']
+if (userDataDir) app.setPath('userData', userDataDir)
 
-// The app is one local page: a dropped file or link must never replace it and inherit the bridge.
-app.on('web-contents-created', (_, contents) => {
-  contents.on('will-navigate', (event) => event.preventDefault())
-  contents.setWindowOpenHandler(() => ({ action: 'deny' }))
-})
+// One instance per data directory (#8 D12): a second launch hands over to the running one and
+// exits before it loads or saves anything.
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  startApp()
+}
 
-// No PTY process outlives the app.
-app.on('before-quit', () => terminals.killAll())
+function startApp(): void {
+  const state = registerState()
+  const terminals = registerTerminals()
+  registerClipboard()
+  registerDirectories()
 
-app.whenReady().then(() => {
-  createWindow()
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  // The app is one local page: a dropped file or link must never replace it and inherit the bridge.
+  app.on('web-contents-created', (_, contents) => {
+    contents.on('will-navigate', (event) => event.preventDefault())
+    contents.setWindowOpenHandler(() => ({ action: 'deny' }))
   })
-})
 
-// Quit when all windows are closed, except on macOS (Cmd+Q quits there).
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
-})
+  // Pending board changes reach the disk, then no PTY process outlives the app.
+  app.on('before-quit', () => {
+    state.flush()
+    terminals.killAll()
+  })
+
+  // Another launch on the same data directory: bring this one's window forward instead.
+  app.on('second-instance', () => {
+    if (!app.isReady()) return
+    const [window] = BrowserWindow.getAllWindows()
+    if (!window) {
+      createWindow()
+      return
+    }
+    if (window.isMinimized()) window.restore()
+    window.show()
+    window.focus()
+  })
+
+  app.whenReady().then(() => {
+    createWindow()
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
+  })
+
+  // Quit when all windows are closed, except on macOS (Cmd+Q quits there).
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit()
+  })
+}
