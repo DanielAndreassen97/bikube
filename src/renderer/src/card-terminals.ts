@@ -5,7 +5,7 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import { runningCount } from '../../core/card-deletes'
 import { isBackShortcut } from '../../core/card-shortcuts'
 import { CardSessions, type CardScreen } from '../../core/card-sessions'
-import type { CardStatus } from '../../core/card-status'
+import type { CardRunState, CardStatus } from '../../core/card-status'
 import { clipboardShortcut, copySelection, pasteFromClipboard } from '../../core/clipboard'
 import { isSoftwareRenderer } from '../../core/webgl-support'
 import '@xterm/xterm/css/xterm.css'
@@ -31,8 +31,8 @@ function hardwareWebgl(): boolean {
 export type TerminalHost = HTMLDivElement & { __xterm?: XTerm }
 
 /**
- * A card's xterm.js screen. It exists from card creation on and parses output while no view
- * shows it; the full-size view attaches its element and fits it. Only an attached screen gets
+ * A card's xterm.js screen for one start (#5 D6, D7), discarded when the card is Stopped. It
+ * parses output while no view shows it; the full-size view attaches its element and fits it. Only an attached screen gets
  * a WebGL context, since Chromium caps them at about 16.
  */
 export class XtermScreen implements CardScreen {
@@ -148,7 +148,7 @@ export class XtermScreen implements CardScreen {
 
 let registry: CardSessions<XtermScreen> | undefined
 
-/** The app-wide card terminals: one per card for the card's life (#4 D10). */
+/** The app-wide card terminals: one per card, with a fresh screen each start (#5 D7). */
 export function cardTerminals(): CardSessions<XtermScreen> {
   registry ??= new CardSessions(window.drovr.terminal, () => new XtermScreen())
   return registry
@@ -159,6 +159,14 @@ export function useCardStatus(cardId: string): CardStatus | undefined {
   return useSyncExternalStore(
     (listener) => cardTerminals().subscribe(cardId, listener),
     () => cardTerminals().status(cardId)
+  )
+}
+
+/** The card's process state: running, Stopped or couldn't start (#5 D6). */
+export function useCardRunState(cardId: string): CardRunState | undefined {
+  return useSyncExternalStore(
+    (listener) => cardTerminals().subscribe(cardId, listener),
+    () => cardTerminals().runState(cardId)
   )
 }
 
