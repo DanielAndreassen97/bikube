@@ -9,13 +9,26 @@ import {
   writeFileSync
 } from 'node:fs'
 import { StateFile } from '../core/state-file'
+import type { WorkspaceState } from '../core/workspace-store'
 import { IPC } from '../shared/api'
+
+export interface MainState {
+  /** Main's latest state: the last valid save, else the file's, else an empty board. */
+  load(): WorkspaceState
+  /**
+   * Replaces main's state with a board from the sync folder (#13 D7, D11) and writes it like a
+   * save; not passed to `onSaved`, since it came from the folder.
+   */
+  set(state: WorkspaceState): void
+  flush(): void
+}
 
 /**
  * The saved-state file in `userData` (#8 D2, D5, D6, D7). Only a window's own top-level page may
- * load or save; call `flush` before quitting.
+ * load or save; call `flush` before quitting. `onSaved` gets every valid save (the sync folder
+ * writes the board from them, #13 D4).
  */
-export function registerState(): { flush(): void } {
+export function registerState(onSaved?: (state: WorkspaceState) => void): MainState {
   const dir = app.getPath('userData')
   try {
     mkdirSync(dir, { recursive: true })
@@ -35,7 +48,13 @@ export function registerState(): { flush(): void } {
     return file.load()
   })
   ipcMain.on(IPC.stateSave, (event, state: unknown) => {
-    if (fromMainFrame(event)) file.save(state)
+    if (fromMainFrame(event) && file.save(state)) onSaved?.(file.load())
   })
-  return { flush: () => file.flush() }
+  return {
+    load: () => file.load(),
+    set: (next) => {
+      file.save(next)
+    },
+    flush: () => file.flush()
+  }
 }
