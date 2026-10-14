@@ -1,4 +1,6 @@
 import { ipcMain, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from 'electron'
+import { acknowledgeRequest } from '../core/ack-request'
+import { FlowControl } from '../core/flow-control'
 import {
   SPAWN_REFUSAL,
   isCardId,
@@ -34,6 +36,15 @@ export interface Terminals {
  */
 export function registerTerminals(shellEnv: (cardId: string) => Record<string, string>): Terminals {
   const manager = new SessionManager()
+  // Pauses a session's PTY while the renderer is behind on parsing its output (#16 D1).
+  const flow = new FlowControl(manager)
+  // The benchmark's backlog reading (#16 D7), read through `app.evaluate`; only when it runs.
+  if (process.env.DROVR_BENCH) {
+    ;(globalThis as { __drovrFlowPeak?: { read(): number; reset(): void } }).__drovrFlowPeak = {
+      read: () => flow.peakUnacked(),
+      reset: () => flow.resetPeak()
+    }
+  }
   const owners = new SessionOwners<WebContents>()
   const pages = new PageGenerations<WebContents>()
   const cards = new SessionCards()
@@ -42,12 +53,16 @@ export function registerTerminals(shellEnv: (cardId: string) => Record<string, s
 
   manager.on('data', (id, data) => {
     const owner = owners.ownerOf(id)
-    if (owner && !owner.isDestroyed()) owner.send(IPC.data, id, data)
+    if (!owner || owner.isDestroyed()) return
+    owner.send(IPC.data, id, data)
+    // Only what was sent counts: nothing else will ever be acknowledged (#16 D1).
+    flow.sent(id, data.length)
   })
   manager.on('exit', (id, { exitCode, signal }) => {
     const owner = owners.ownerOf(id)
     owners.remove(id)
     cards.remove(id)
+    flow.forget(id)
     const exit: TerminalExit = { id, exitCode, signal }
     if (owner && !owner.isDestroyed()) owner.send(IPC.exit, exit)
   })
@@ -63,12 +78,12 @@ export function registerTerminals(shellEnv: (cardId: string) => Record<string, s
   const watch = (owner: WebContents): void => {
     const pageGone = (): void => {
       pages.bump(owner)
-      owners.sessionsOf(owner).forEach((id) => manager.kill(id))
+      owners.sessionsOf(owner).forEach((id) => flow.kill(id))
       pageGoneListeners.forEach((listener) => listener(owner))
     }
     owner.once('destroyed', () => {
       pages.release(owner)
-      owners.release(owner).forEach((id) => manager.kill(id))
+      owners.release(owner).forEach((id) => flow.kill(id))
       goneListeners.forEach((listener) => listener(owner))
     })
     // A reload or crash leaves the old page's shells with no UI to drive them; a spawn still
@@ -119,7 +134,11 @@ export function registerTerminals(shellEnv: (cardId: string) => Record<string, s
     }
   })
   ipcMain.on(IPC.kill, (event, id: unknown) => {
-    if (ownedBy(event, id)) manager.kill(id)
+    if (ownedBy(event, id)) flow.kill(id)
+  })
+  // Fire-and-forget like `write`; anything but a positive safe integer is ignored (#16 D3).
+  ipcMain.on(IPC.ack, (event, id: unknown, chars: unknown) => {
+    acknowledgeRequest((session): session is string => ownedBy(event, session), id, chars, flow)
   })
 
   return {
