@@ -1,11 +1,12 @@
 /**
  * Each card's extra panes and their layout (#11 D1–D3, D5): a plain login shell per extra pane,
- * started in the card's directory with the card's id and no startup line, on its own screen.
+ * started in the card's directory with the card's id and no startup line, on its own screen; in
+ * an SSH card, its own `ssh` session to the card's host (#12 D8).
  * The main pane is the card's own terminal in `CardSessions`; this registry only knows it as
  * the leaf `MAIN_PANE`. Sessions go through the router shared with `CardSessions`, so early
  * output is never lost to a second listener. Plain TS, like `CardSessions`.
  */
-import type { TerminalApi } from '../shared/api'
+import type { TerminalApi, TerminalExit } from '../shared/api'
 import type { CardRef, CardScreen } from './card-sessions'
 import type { SessionRouter } from './session-router'
 import {
@@ -75,26 +76,41 @@ export class CardPanes<S extends CardScreen> {
       if (pane.sessionId) this.api.resize(pane.sessionId, cols, rows)
     })
     const { cols, rows } = screen
-    this.router.spawn(cols, rows, card.directory, card.id, (result) => {
-      if (pane.removed) return result.ok ? this.api.kill(result.id) : undefined
-      if (!result.ok) {
-        // Read-only, and it stays until closed (D5, #5 D8).
-        screen.write(`Couldn't start: ${result.reason}\r\n`)
-        return screen.setReadOnly()
-      }
-      pane.sessionId = result.id
-      const early = this.router.adopt(result.id, {
-        output: (data) => screen.write(data),
-        exited: () => this.remove(card.id, id)
-      })
-      // The view may have fitted the screen while the shell was starting.
-      if (screen.cols !== cols || screen.rows !== rows) {
-        this.api.resize(result.id, screen.cols, screen.rows)
-      }
-      early.data.forEach((data) => screen.write(data))
-      // A shell that exits by itself takes its pane with it (D5).
-      if (early.exit) this.remove(card.id, id)
-    })
+    // An SSH card's pane connects to the card's host too (#12 D8).
+    this.router.spawn(
+      cols,
+      rows,
+      card.directory,
+      card.id,
+      (result) => {
+        if (pane.removed) return result.ok ? this.api.kill(result.id) : undefined
+        if (!result.ok) {
+          // Read-only, and it stays until closed (D5, #5 D8).
+          screen.write(`Couldn't start: ${result.reason}\r\n`)
+          return screen.setReadOnly()
+        }
+        pane.sessionId = result.id
+        const exited = ({ exitCode }: TerminalExit): void => {
+          // An SSH pane whose ssh failed keeps its screen, read-only, until closed (#12 D8).
+          if (card.host === undefined || exitCode !== 255) return this.remove(card.id, id)
+          pane.sessionId = null
+          screen.write('\r\nSSH failed\r\n')
+          screen.setReadOnly()
+        }
+        const early = this.router.adopt(result.id, {
+          output: (data) => screen.write(data),
+          exited
+        })
+        // The view may have fitted the screen while the shell was starting.
+        if (screen.cols !== cols || screen.rows !== rows) {
+          this.api.resize(result.id, screen.cols, screen.rows)
+        }
+        early.data.forEach((data) => screen.write(data))
+        // A shell that exits by itself takes its pane with it (D5).
+        if (early.exit) exited(early.exit)
+      },
+      card.host ?? null
+    )
     this.setLayout(card.id, after)
     return id
   }
