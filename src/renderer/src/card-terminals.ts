@@ -3,8 +3,11 @@ import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { runningCount } from '../../core/card-deletes'
-import { isBackShortcut, isSettingsShortcut } from '../../core/card-shortcuts'
+import { isBackShortcut, isSettingsShortcut, splitShortcut } from '../../core/card-shortcuts'
+import { CardPanes } from '../../core/card-panes'
 import { CardSessions, type CardScreen } from '../../core/card-sessions'
+import { SessionRouter } from '../../core/session-router'
+import type { PaneLayout } from '../../core/split-tree'
 import {
   knownRunState,
   knownStatus,
@@ -98,6 +101,8 @@ export class XtermScreen implements CardScreen {
       if (isBackShortcut(event, window.drovr.platform)) return false
       // So is opening Settings, handled by the app (#10 D5).
       if (isSettingsShortcut(event, window.drovr.platform)) return false
+      // And splitting the focused pane, handled by the view (#11 D4).
+      if (splitShortcut(event, window.drovr.platform)) return false
       const action = clipboardShortcut(event, window.drovr.platform)
       if (!action) return true
       // Stop the native paste event too, or xterm would paste twice.
@@ -211,12 +216,44 @@ export class XtermScreen implements CardScreen {
   }
 }
 
+let router: SessionRouter | undefined
 let registry: CardSessions<XtermScreen> | undefined
+let paneRegistry: CardPanes<XtermScreen> | undefined
+
+/** The one router of terminal events, shared by cards' own terminals and their extra panes. */
+function sessionRouter(): SessionRouter {
+  router ??= new SessionRouter(window.drovr.terminal)
+  return router
+}
 
 /** The app-wide card terminals: one per card, with a fresh screen each start (#5 D7). */
 export function cardTerminals(): CardSessions<XtermScreen> {
-  registry ??= new CardSessions(window.drovr.terminal, () => new XtermScreen())
+  if (!registry) {
+    registry = new CardSessions(window.drovr.terminal, () => new XtermScreen(), sessionRouter())
+    // When the main pane's shell stops or couldn't start, every extra pane ends with it
+    // (#11 D1, D6).
+    registry.onEnded((cardId) => cardPanes().dispose(cardId))
+  }
   return registry
+}
+
+/** The app-wide extra panes of cards (#11 D1), with their layouts. */
+export function cardPanes(): CardPanes<XtermScreen> {
+  paneRegistry ??= new CardPanes(
+    window.drovr.terminal,
+    sessionRouter(),
+    () => new XtermScreen(),
+    (cardId) => cardTerminals().runState(cardId)?.kind === 'running'
+  )
+  return paneRegistry
+}
+
+/** The card's panes and which is focused (#11 D2, D3), re-rendering when they change. */
+export function usePaneLayout(cardId: string): PaneLayout {
+  return useSyncExternalStore(
+    (listener) => cardPanes().subscribe(cardId, listener),
+    () => cardPanes().layout(cardId)
+  )
 }
 
 /**

@@ -419,6 +419,46 @@ describe('CardSessions', () => {
   })
 })
 
+describe('onEnded (#11 D1, D6)', () => {
+  it("tells the listener with the card's id when its shell stops, however it stopped", async () => {
+    const stopped: string[] = []
+    sessions.onEnded((cardId) => stopped.push(cardId))
+    await started('c1', { ok: true, id: 's1' })
+    await started('c2', { ok: true, id: 's2' })
+    api.emitExit({ id: 's1', exitCode: 0 })
+    expect(stopped).toEqual(['c1'])
+    sessions.close('c2')
+    api.emitExit({ id: 's2', exitCode: 0 })
+    expect(stopped).toEqual(['c1', 'c2'])
+  })
+
+  it('tells it of a shell that exited before its spawn reply, not of a dispose', async () => {
+    const stopped: string[] = []
+    sessions.onEnded((cardId) => stopped.push(cardId))
+    sessions.start(card('c1'))
+    api.emitExit({ id: 's1', exitCode: 1 })
+    api.spawns[0].resolve({ ok: true, id: 's1' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(stopped).toEqual(['c1'])
+    await started('c2', { ok: true, id: 's2' })
+    sessions.dispose('c2')
+    expect(stopped).toEqual(['c1'])
+  })
+
+  it("tells it of a start that couldn't start: a failed reply or a rejected spawn (#11 D1)", async () => {
+    const ended: string[] = []
+    sessions.onEnded((cardId) => ended.push(cardId))
+    await started('c1', { ok: false, reason: 'working directory not found' })
+    expect(sessions.runState('c1')?.kind).toBe('failed')
+    expect(ended).toEqual(['c1'])
+    api.spawn = () => Promise.reject(new Error('boom'))
+    sessions.start(card('c2'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(sessions.runState('c2')?.kind).toBe('failed')
+    expect(ended).toEqual(['c1', 'c2'])
+  })
+})
+
 describe('agent status (#9 D8)', () => {
   it('shows in place of the last output line while running, even after more output', async () => {
     await started('c1', { ok: true, id: 's1' })
