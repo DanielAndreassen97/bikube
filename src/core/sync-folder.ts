@@ -3,9 +3,14 @@
  * injected fs, so Vitest drives it with a fake directory and fake timers. It owns the sync status
  * and the last board read from or written to the file (kept in memory only, D11), and writes the
  * board atomically when it differs from that one (D4).
+ *
+ * The fs is async (#26 D1), so a stalled folder never blocks main's event loop. Every operation
+ * (set folder, launch read, read, the timer's write, flush) runs on one queue, each to completion
+ * before the next starts (#26 D2), so each sees and leaves the state the synchronous code did; a
+ * read asked for while one is waiting to start joins that one and resolves null (#26 D3). The
+ * returned promises never reject: an operation that throws is logged and resolves to nothing.
  */
 import { join } from 'node:path'
-import type { StateFileFs } from './state-file'
 import {
   SYNC_FILE_NAME,
   joinBoards,
@@ -19,9 +24,22 @@ import type { Workspace, WorkspaceState } from './workspace-store'
 /** How long after a board change the file is written; D4 asks for within 1 second. */
 export const SYNC_WRITE_DELAY_MS = 200
 
-/** The state file's fs, plus `statSync` to tell a missing file from a missing folder (D12). */
-export interface SyncFolderFs extends StateFileFs {
-  statSync(path: string): { isDirectory(): boolean }
+/** An open temp file (`node:fs/promises`' `FileHandle`). */
+export interface SyncFileHandle {
+  writeFile(data: string, encoding: 'utf8'): Promise<void>
+  sync(): Promise<void>
+  close(): Promise<void>
+}
+
+/**
+ * The `node:fs/promises` calls the sync folder needs (#26 D1): `stat` tells a missing file from a
+ * missing folder (D12).
+ */
+export interface SyncFolderFs {
+  readFile(path: string, encoding: 'utf8'): Promise<string>
+  stat(path: string): Promise<{ isDirectory(): boolean }>
+  open(path: string, flags: 'w'): Promise<SyncFileHandle>
+  rename(from: string, to: string): Promise<void>
 }
 
 export interface SyncFolderOptions {
@@ -67,6 +85,12 @@ export class SyncFolder {
   /** The board to write when the timer fires, serialized. */
   private pending: string | null = null
   private timer: ReturnType<typeof setTimeout> | null = null
+  /** The queue's tail (#26 D2): settles once every operation queued so far has finished. */
+  private tail: Promise<void> = Promise.resolve()
+  /** Operations queued or running. */
+  private queued = 0
+  /** A read queued and not yet started, which a later read joins (#26 D3); null for none. */
+  private waitingRead: Promise<Workspace[] | null> | null = null
 
   constructor(private readonly options: SyncFolderOptions) {}
 
@@ -83,27 +107,40 @@ export class SyncFolder {
    * Turns sync on for `folder` (already checked to be an existing directory) and joins the boards
    * (D9), or turns it off with null. With no file in the folder, `local`'s board is written to it;
    * with a valid one, the joined board is written and returned for the renderer to apply. Returns
-   * null when there is nothing to apply. Setting the folder in use again changes nothing.
+   * null when there is nothing to apply. Setting the folder in use again changes nothing. Queued
+   * (#26 D2); resolves once done.
    */
-  setFolder(folder: string | null, local: WorkspaceState): Workspace[] | null {
+  setFolder(folder: string | null, local: WorkspaceState): Promise<Workspace[] | null> {
+    // The join uses the latest board noted when it runs, so a save made meanwhile isn't lost.
+    this.noteLocal(local.workspaces)
+    return this.enqueue(() => this.setFolderNow(folder), null)
+  }
+
+  private async setFolderNow(folder: string | null): Promise<Workspace[] | null> {
     if (folder === this.folder) return null
     // D10: a pending change goes to the old folder first when it is synced (read first, D12).
-    if (this.current.kind === 'synced') this.writePending()
+    if (this.current.kind === 'synced') await this.writePending()
     else this.cancelPending()
     this.folder = folder
     this.last = null
-    const localText = this.noteLocal(local.workspaces)
     this.joinOwed = folder !== null
     if (folder === null) {
       this.setStatus({ kind: 'off' })
       return null
     }
-    const read = this.readFile(folder)
+    const read = await this.readFile(folder)
     switch (read.kind) {
-      case 'missing':
-        this.write(localText)
+      case 'missing': {
+        // The latest board, with any change noted during the read; its pending write would only
+        // repeat it.
+        const latest = this.noteLocal(this.localWorkspaces)
+        this.cancelPending()
+        await this.write(latest)
         return null
+      }
       case 'valid':
+        // A change noted during the read is in the join; its pending write would undo the join.
+        this.cancelPending()
         return this.join(folder, read.workspaces)
       case 'unreadable':
         this.log(`sync file unreadable (${read.reason}); not joining or writing`)
@@ -119,34 +156,57 @@ export class SyncFolder {
   /**
    * At launch, with the folder kept in the settings (or null): reads the file to know the last
    * board and the status, and returns the file's board for this machine to apply (D7, D11): not a
-   * join, and compared with nothing, so a valid file always applies. A missing file gets `local`'s
-   * board. Returns null when there is nothing to apply.
+   * join, and compared with nothing, so a valid file applies, unless this machine's board changed
+   * while the read ran, which is then written instead (#26 D4). A missing file gets `local`'s
+   * board. Returns null when there is nothing to apply. Queued (#26 D2); resolves once done. The
+   * folder is in use at once, so a board change noted while the read runs is kept (its write is
+   * queued behind this read) and the read uses the latest board noted.
    */
-  start(folder: string | null, local: WorkspaceState): Workspace[] | null {
+  start(folder: string | null, local: WorkspaceState): Promise<Workspace[] | null> {
     this.folder = folder
     this.last = null
-    const localText = this.noteLocal(local.workspaces)
+    const launchText = this.noteLocal(local.workspaces)
     this.joinOwed = false
+    return this.enqueue(() => this.startNow(folder, launchText), null)
+  }
+
+  /** `launchText` is this machine's board as at launch, before any change noted during the read. */
+  private async startNow(folder: string | null, launchText: string): Promise<Workspace[] | null> {
     if (folder === null) return null
-    const read = this.readFile(folder)
+    const read = await this.readFile(folder)
+    const localText = this.noteLocal(this.localWorkspaces)
     switch (read.kind) {
       case 'missing':
-        this.write(localText)
+        // The latest board is written now; a pending write of it would only repeat it.
+        this.cancelPending()
+        await this.write(localText)
         return null
-      case 'valid':
-        this.last = this.boardText(read.workspaces)
-        this.local = this.last
+      case 'valid': {
+        this.cancelPending()
+        const text = this.boardText(read.workspaces)
+        // #26 D4: a change noted here since launch (while a late read stalled) wins and is
+        // written, as D12's recovery.
+        if (localText !== launchText && localText !== text) {
+          await this.write(localText)
+          return null
+        }
+        // Else the file's board applies (D11), and a later join starts from it (D9).
+        this.last = text
+        this.noteLocal(read.workspaces)
         this.setStatus({ kind: 'synced', folder, at: this.now().toISOString() })
         return read.workspaces
+      }
       case 'unreadable':
-        // Nothing has changed here since launch: once the file is valid it applies (D11).
-        this.last = localText
+        // Once the file is valid it applies (D11), unless a change was noted here since launch,
+        // even during this read, which then wins (D12).
+        this.last = launchText
         this.log(`sync file unreadable (${read.reason}); not writing`)
         this.setStatus({ kind: 'unreadable', folder })
         return null
       case 'unavailable':
-        // Nothing has changed here since launch: once the folder is back its file applies (D11).
-        this.last = localText
+        // Once the folder is back its file applies (D11), unless a change was noted here since
+        // launch, even during this read, which then wins (D12).
+        this.last = launchText
         this.log(`sync folder unavailable (${read.reason})`)
         this.setStatus({ kind: 'unavailable', folder })
         return null
@@ -158,17 +218,31 @@ export class SyncFolder {
    * for this machine to apply when it differs from the last one read or written (D4, D7), dropping
    * a pending write of an older board (last writer wins); else null. Applying it saves a board
    * equal to the file's, which is then not written back, so machines never echo (D4). A folder
-   * with no file gets this machine's board. While the folder is unavailable or its file unreadable, this is D12's retry and recovery.
+   * with no file gets this machine's board. While the folder is unavailable or its file
+   * unreadable, this is D12's retry and recovery. Queued (#26 D2); a read asked for while one is
+   * already waiting to start joins it and resolves null, once it has run (#26 D3), so at most one
+   * read runs and one waits.
    */
-  read(): Workspace[] | null {
+  read(): Promise<Workspace[] | null> {
+    // #26 D3: only the waiting read's own caller applies what it finds.
+    if (this.waitingRead !== null) return this.waitingRead.then(() => null)
+    const read = this.enqueue(() => {
+      this.waitingRead = null
+      return this.readNow()
+    }, null)
+    this.waitingRead = read
+    return read
+  }
+
+  private async readNow(): Promise<Workspace[] | null> {
     const folder = this.folder
     if (folder === null) return null
     const recovering = this.current.kind === 'unavailable' || this.current.kind === 'unreadable'
-    const read = this.readFile(folder)
+    const read = await this.readFile(folder)
     switch (read.kind) {
       case 'missing':
         this.cancelPending()
-        if (this.local !== null) this.write(this.local)
+        if (this.local !== null) await this.write(this.local)
         return null
       case 'valid': {
         if (this.joinOwed) {
@@ -180,7 +254,7 @@ export class SyncFolder {
         // board wins.
         if (recovering && this.local !== null && this.local !== this.last && this.local !== text) {
           this.cancelPending()
-          this.write(this.local)
+          await this.write(this.local)
           return null
         }
         this.setStatus({ kind: 'synced', folder, at: this.now().toISOString() })
@@ -203,11 +277,13 @@ export class SyncFolder {
   /**
    * A board change saved on this machine: written within `SYNC_WRITE_DELAY_MS` when its board
    * differs from the last one read or written (D4). Ignored while sync is off or the file is
-   * unreadable (D12: it is never overwritten).
+   * unreadable (D12: it is never overwritten). Synchronous bookkeeping: the timer queues the write
+   * (#26 D2), which takes the pending board when it runs, so a read before it can still drop it.
    */
   noteBoard(state: WorkspaceState): void {
-    if (this.folder === null) return
+    // Noted even while sync is off, for a queued `setFolder`'s join.
     const text = this.noteLocal(state.workspaces)
+    if (this.folder === null) return
     if (this.current.kind === 'unreadable') return
     if (text === this.last) {
       this.cancelPending()
@@ -217,24 +293,51 @@ export class SyncFolder {
     if (this.timer === null) {
       this.timer = setTimeout(() => {
         this.timer = null
-        const next = this.pending
-        this.pending = null
-        const newer = next === null ? null : this.writeChange(next)
-        if (newer !== null) this.options.onBoard?.(newer)
+        void this.enqueue(async () => {
+          const next = this.pending
+          this.cancelPending()
+          const newer = next === null ? null : await this.writeChange(next)
+          if (newer !== null) this.options.onBoard?.(newer)
+        }, undefined)
       }, SYNC_WRITE_DELAY_MS)
     }
   }
 
-  /** Writes a pending board now, synchronously (before quit). */
-  flush(): void {
-    this.writePending()
+  /**
+   * Writes a pending board now, behind any running operation, and resolves once the queue is empty
+   * (#26 D5, before quit).
+   */
+  async flush(): Promise<void> {
+    await this.enqueue(() => this.writePending(), undefined)
+    while (this.queued > 0) await this.tail
+  }
+
+  /** Whether a board is pending or an operation is queued or running (#26 D5's quit hold). */
+  busy(): boolean {
+    return this.pending !== null || this.queued > 0
+  }
+
+  /**
+   * Runs `operation` once every operation queued before it has finished (#26 D2). A failure is
+   * logged and resolves to `fallback`, and the queue goes on.
+   */
+  private enqueue<T>(operation: () => Promise<T>, fallback: T): Promise<T> {
+    this.queued++
+    const run = this.tail.then(operation).catch((err: unknown) => {
+      this.log(`sync operation failed: ${String(err)}`)
+      return fallback
+    })
+    this.tail = run.then(() => {
+      this.queued--
+    })
+    return run
   }
 
   /** Writes a pending board now, dropping a newer board the file holds (nothing will apply it). */
-  private writePending(): void {
+  private async writePending(): Promise<void> {
     const next = this.pending
     this.cancelPending()
-    if (next !== null) this.writeChange(next)
+    if (next !== null) await this.writeChange(next)
   }
 
   /**
@@ -243,11 +346,11 @@ export class SyncFolder {
    * machine's write, D7) wins: it is returned for this machine to apply instead. While the folder
    * is unavailable this is D12's retry, where a change made meanwhile wins over the file.
    */
-  private writeChange(boardText: string): Workspace[] | null {
+  private async writeChange(boardText: string): Promise<Workspace[] | null> {
     const folder = this.folder
     if (folder === null) return null
     const recovering = this.current.kind === 'unavailable' || this.current.kind === 'unreadable'
-    const read = this.readFile(folder)
+    const read = await this.readFile(folder)
     switch (read.kind) {
       case 'unavailable':
         this.reportUnavailable(read.reason)
@@ -256,14 +359,14 @@ export class SyncFolder {
         this.reportUnreadable(read.reason)
         return null
       case 'missing':
-        this.write(boardText)
+        await this.write(boardText)
         return null
       case 'valid': {
         // An owed join is the next read's (D9): this machine's board never replaces the file's.
         if (this.joinOwed) return null
         const text = this.boardText(read.workspaces)
         if (recovering || text === this.last) {
-          this.write(boardText)
+          await this.write(boardText)
           return null
         }
         this.last = text
@@ -278,14 +381,14 @@ export class SyncFolder {
    * D9's join of the file's board with this machine's: written when it differs from the file,
    * and returned for this machine to apply.
    */
-  private join(folder: string, file: Workspace[]): Workspace[] {
+  private async join(folder: string, file: Workspace[]): Promise<Workspace[]> {
     const joined = joinBoards(file, this.localWorkspaces)
     this.last = this.boardText(file)
     const text = this.noteLocal(joined)
     if (text === this.last) {
       this.joinOwed = false
       this.setStatus({ kind: 'synced', folder, at: this.now().toISOString() })
-    } else this.write(text)
+    } else await this.write(text)
     return joined
   }
 
@@ -306,15 +409,15 @@ export class SyncFolder {
     return JSON.stringify(toSyncBoard({ workspaces, activeId: null }, this.options.home))
   }
 
-  private readFile(folder: string): ReadResult {
+  private async readFile(folder: string): Promise<ReadResult> {
     let text: string
     try {
-      text = this.options.fs.readFileSync(join(folder, SYNC_FILE_NAME), 'utf8')
+      text = await this.options.fs.readFile(join(folder, SYNC_FILE_NAME), 'utf8')
     } catch (err) {
       if (!isMissing(err)) return { kind: 'unavailable', reason: String(err) }
       // No file: only a folder that is still a directory is merely empty (D12).
       try {
-        if (this.options.fs.statSync(folder).isDirectory()) return { kind: 'missing' }
+        if ((await this.options.fs.stat(folder)).isDirectory()) return { kind: 'missing' }
         return { kind: 'unavailable', reason: `${folder} is not a directory` }
       } catch (statErr) {
         return { kind: 'unavailable', reason: String(statErr) }
@@ -329,7 +432,7 @@ export class SyncFolder {
    * Writes `boardText` atomically (temp file, flushed, renamed over the file, as #8 D2) and
    * remembers it as the last board; a failure reports the folder unavailable.
    */
-  private write(boardText: string): void {
+  private async write(boardText: string): Promise<void> {
     const folder = this.folder
     if (folder === null) return
     const path = join(folder, SYNC_FILE_NAME)
@@ -337,14 +440,14 @@ export class SyncFolder {
     const now = this.now()
     const fs = this.options.fs
     try {
-      const fd = fs.openSync(tmpPath, 'w')
+      const file = await fs.open(tmpPath, 'w')
       try {
-        fs.writeFileSync(fd, serializeSyncFile(JSON.parse(boardText), now), 'utf8')
-        fs.fsyncSync(fd)
+        await file.writeFile(serializeSyncFile(JSON.parse(boardText), now), 'utf8')
+        await file.sync()
       } finally {
-        fs.closeSync(fd)
+        await file.close()
       }
-      fs.renameSync(tmpPath, path)
+      await fs.rename(tmpPath, path)
     } catch (err) {
       this.reportUnavailable(`sync file not written: ${String(err)}`)
       return

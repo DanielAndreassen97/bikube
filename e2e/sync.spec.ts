@@ -1,13 +1,19 @@
 import { expect, test, type ElectronApplication, type Locator, type Page } from '@playwright/test'
+import { execFileSync } from 'node:child_process'
 import {
+  closeSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  renameSync,
   rmSync,
   watch,
   writeFileSync
 } from 'node:fs'
+import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { addFakeAgents, agentLogLines } from './fake-agents'
@@ -730,4 +736,119 @@ test('AC10: an unreadable file shows unreadable, the board stays, and the file i
   await a.page.waitForTimeout(2000)
   expect(readFileSync(syncFilePath(folder), 'utf8')).toBe('not json')
   await expect(a.page.getByTestId('sync-status')).toHaveText('Sync file unreadable')
+})
+
+// Async I/O for the sync folder (#26).
+
+test('#26 AC6: a change made just before quit is in the file once the app has exited', async () => {
+  test.skip(process.platform === 'darwin', 'closing the last window quits only off macOS')
+  const folder = makeDir('F')
+  const a = await oneSynced(folder)
+  await editWorkspace(a.page, 0)
+  await a.page.getByTestId('workspace-name').fill('renamed')
+  const child = a.app.process()
+  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
+  // The window is closed (quitting the app) by the page itself as soon as the rename is stored
+  // (and so saved: the dialog closes after the store's save), well within `SYNC_WRITE_DELAY_MS`,
+  // so only quit's flush can write the change. No card runs, so only the sync folder holds this
+  // quit (D5).
+  await a.page
+    .evaluate(() => {
+      const closeOnceStored = new MutationObserver(() => {
+        if (document.querySelector('[data-testid="workspace-dialog"]') !== null) return
+        closeOnceStored.disconnect()
+        window.close()
+      })
+      closeOnceStored.observe(document.body, { childList: true, subtree: true })
+      document.querySelector<HTMLButtonElement>('[data-testid="workspace-submit"]')!.click()
+    })
+    .catch(() => {})
+  await exited
+  apps.splice(apps.indexOf(a.app), 1)
+  expect(readSyncFile(folder)?.board.workspaces.map((w) => w.name)).toEqual(['renamed'])
+  // The flush finished, so the process ended on its own, not by D5's SIGKILL.
+  expect(child.signalCode).toBeNull()
+})
+
+/** 2 × `QUIT_WAIT_MS` (the kill's 2 s grace period + 1 s, #18 D2) plus 5 s (#26 AC6). */
+const STALLED_QUIT_BOUND_MS = 2 * 3_000 + 5_000
+
+test('#26 AC6: with the sync file stalled, the app still ends within two quit holds', async () => {
+  const folder = makeDir('F')
+  const a = await oneSynced(folder)
+  await quit(a)
+  // A FIFO left unfed: the launch read never returns.
+  rmSync(syncFilePath(folder))
+  execFileSync('mkfifo', [syncFilePath(folder)])
+  const b = await launch(a.home, a.dataDir)
+  await expect(b.page.getByTestId('sync-status')).toHaveCount(0)
+
+  const child = b.app.process()
+  const ended = new Promise<number>((resolve) => child.once('exit', () => resolve(Date.now())))
+  const quitAt = Date.now()
+  await b.app.evaluate(({ app }) => app.quit()).catch(() => {})
+  expect((await ended) - quitAt).toBeLessThan(STALLED_QUIT_BOUND_MS)
+  // D5: main ended itself, as libuv would wait forever for the stalled read's thread.
+  expect(child.signalCode).toBe('SIGKILL')
+  apps.splice(apps.indexOf(b.app), 1)
+})
+
+test("#26 AC1: a stalled sync file freezes nothing, and this machine's changed board wins once it is read", async () => {
+  const folder = makeDir('F')
+  const a = await oneSynced(folder)
+  const valid = JSON.parse(readFileSync(syncFilePath(folder), 'utf8')) as SyncFile
+  await quit(a)
+  // A FIFO with no writer: reading it never returns until something writes into it. `feed` is
+  // the same FIFO under another name, so the file can be made a regular one before it is fed.
+  rmSync(syncFilePath(folder))
+  execFileSync('mkfifo', [syncFilePath(folder)])
+  const feed = join(root, 'feed')
+  linkSync(syncFilePath(folder), feed)
+
+  const b = await launch(a.home, a.dataDir)
+  try {
+    expect(await workspaceNames(b.page)).toEqual(['api'])
+    // D4: the status stays `off` (no status line) until the launch read finishes.
+    await expect(b.page.getByTestId('sync-status')).toHaveCount(0)
+    await column(b.page, 'Backlog').getByTestId('new-card').click()
+    await b.page.getByTestId('new-card-input').press('Enter')
+    await expect(b.page.getByTestId('card-view')).toBeVisible()
+    await b.page.keyboard.type('echo ok-$((40+2))')
+    await b.page.keyboard.press('Enter')
+    await expect.poll(() => bufferLines(b.page), { timeout: 5000 }).toContain('ok-42')
+
+    // Focusing the window asks for another read, which waits behind the stalled one.
+    await b.app.evaluate(({ app, BrowserWindow }) => {
+      const [window] = BrowserWindow.getAllWindows()
+      window?.focus()
+      app.emit('browser-window-focus', {}, window)
+    })
+    await b.page.keyboard.type('echo ok-$((40+3))')
+    await b.page.keyboard.press('Enter')
+    await expect.poll(() => bufferLines(b.page), { timeout: 5000 }).toContain('ok-43')
+    await b.page.getByTestId('card-back').click()
+    expect(await workspaceNames(b.page)).toEqual(['api'])
+    await expect(b.page.getByTestId('sync-status')).toHaveCount(0)
+
+    // Another machine's board, with the workspace renamed `remote`.
+    valid.savedAt = new Date().toISOString()
+    valid.board.workspaces[0].name = 'remote'
+    const text = JSON.stringify(valid)
+    const next = join(root, 'next.json')
+    writeFileSync(next, text)
+    renameSync(next, syncFilePath(folder))
+    await writeFile(feed, text)
+    // D4: this machine's board changed since launch (its new card), so it wins and is written.
+    await expect(b.page.getByTestId('sync-status')).toHaveText(SYNCED, { timeout: 5000 })
+    await expect
+      .poll(() => readSyncFile(folder)?.board.workspaces.map((w) => w.name), { timeout: 5000 })
+      .toEqual(['api'])
+    expect(cardsInFile(folder)).toEqual(['Terminal 1'])
+    expect(await workspaceNames(b.page)).toEqual(['api'])
+    expect(await cardTitles(column(b.page, 'Backlog'))).toEqual(['Terminal 1'])
+  } finally {
+    // A read still stalled would keep the app from exiting (libuv waits for its thread): opening
+    // the FIFO read-write never blocks and, once closed, ends any stalled read with EOF.
+    closeSync(openSync(feed, 'r+'))
+  }
 })

@@ -6,20 +6,12 @@ import {
   type IpcMainInvokeEvent,
   type WebContents
 } from 'electron'
-import {
-  closeSync,
-  fsyncSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  statSync,
-  watch,
-  writeFileSync,
-  type FSWatcher
-} from 'node:fs'
+import { watch, type FSWatcher } from 'node:fs'
+import { open, readFile, rename, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isDirectory } from '../core/directories'
 import { isSyncFolderPath } from '../core/settings'
+import { boundedWait } from '../core/bounded-wait'
 import { applySyncBoard } from '../core/sync-apply'
 import { SyncFolder } from '../core/sync-folder'
 import type { SyncStatus } from '../core/sync-status'
@@ -31,9 +23,26 @@ import type { MainState } from './state'
 export interface MainSync {
   /** A valid `state:save`: written to the sync file when its board changed (#13 D4). */
   noteBoard(state: WorkspaceState): void
-  /** Writes a pending board now and stops watching the folder (before quit). */
-  flush(): void
+  /**
+   * Stops watching the folder and writes a pending board now (before quit), resolving once the
+   * sync folder's queue is empty (#26 D5).
+   */
+  flush(): Promise<void>
+  /** Whether a board is pending or a sync operation is queued or running (#26 D5's quit hold). */
+  busy(): boolean
+  /**
+   * Settles once the launch read has applied its board, or `SYNC_LAUNCH_WAIT_MS` after launch,
+   * whichever comes first (#26 D4); the window's first `state:load` waits for it.
+   */
+  launched: Promise<void>
 }
+
+/**
+ * The longest the window's first `state:load` waits for the launch read (#26 D4): a folder that
+ * answers within it opens the window on the synced board (#13 D11); a later read applies its board
+ * as any read does.
+ */
+export const SYNC_LAUNCH_WAIT_MS = 1000
 
 /** Folder events come in bursts (a temp file, then a rename): read once they settle. */
 const WATCH_SETTLE_MS = 100
@@ -46,15 +55,17 @@ const UNAVAILABLE_RETRY_MS = 2000
 
 /**
  * The sync folder (#13 D1, D4, D9, D10, D11, D13, D14): reads the folder from the settings at once
- * and applies its board to main's state before any window asks for it (so the window opens on the
- * synced board), reads it again whenever the folder changes or a window gains focus, writes the
- * board from every save, and serves the `sync:*` channels to a window's own top-level page only.
+ * and applies its board to main's state once read (the window's first load waits for it, at most
+ * `SYNC_LAUNCH_WAIT_MS`, #26 D4, so the window opens on the synced board), reads it again whenever
+ * the folder changes or a window gains focus, writes the board from every save, and serves the
+ * `sync:*` channels to a window's own top-level page only.
  */
 export function registerSync(state: MainState, settings: MainSettings): MainSync {
   // D15: a test can give each instance its own home, which D5 maps to `~`.
   const home = process.env['DROVR_HOME_DIR'] || homedir()
   const sync = new SyncFolder({
-    fs: { readFileSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, statSync },
+    // #26 D1: async fs, so a stalled folder never blocks main.
+    fs: { readFile, stat, open, rename },
     home,
     onStatus: (status) => {
       followStatus(status.kind)
@@ -86,9 +97,15 @@ export function registerSync(state: MainState, settings: MainSettings): MainSync
   // D11: the folder's contents are watched (sync tools replace the file by renaming it).
   let watcher: FSWatcher | null = null
   let settle: ReturnType<typeof setTimeout> | null = null
+  /** Applies what a queued operation (#26 D2) hands over once it resolves; it never rejects. */
+  const applyWhenRead = (read: Promise<Workspace[] | null>): Promise<void> =>
+    read
+      .then((incoming) => {
+        if (incoming !== null) apply(incoming)
+      })
+      .catch((err: unknown) => console.error(`sync board not applied: ${String(err)}`))
   const readNow = (): void => {
-    const incoming = sync.read()
-    if (incoming !== null) apply(incoming)
+    void applyWhenRead(sync.read())
   }
   const unwatch = (): void => {
     watcher?.close()
@@ -98,7 +115,7 @@ export function registerSync(state: MainState, settings: MainSettings): MainSync
   }
   const watchFolder = (folder: string | null): void => {
     unwatch()
-    if (folder === null) return
+    if (folder === null || stopped) return
     try {
       const w = watch(folder, () => {
         if (settle !== null) clearTimeout(settle)
@@ -122,11 +139,14 @@ export function registerSync(state: MainState, settings: MainSettings): MainSync
    * and the folder is retried every `UNAVAILABLE_RETRY_MS`; once it is back it is watched again.
    */
   let retry: ReturnType<typeof setInterval> | null = null
+  /** Set by quit's flush (#26 D6): the folder is no longer watched or retried after it. */
+  let stopped = false
   const stopRetry = (): void => {
     if (retry !== null) clearInterval(retry)
     retry = null
   }
   const followStatus = (kind: SyncStatus['kind']): void => {
+    if (stopped) return
     if (kind === 'unavailable') {
       unwatch()
       if (retry === null) retry = setInterval(readNow, UNAVAILABLE_RETRY_MS)
@@ -136,32 +156,37 @@ export function registerSync(state: MainState, settings: MainSettings): MainSync
     if (kind !== 'off' && watcher === null) watchFolder(sync.folderPath())
   }
 
-  const launched = sync.start(settings.syncFolder(), state.load())
-  if (launched !== null) apply(launched)
-  watchFolder(sync.folderPath())
+  // A launch read that finishes after `SYNC_LAUNCH_WAIT_MS` still applies its board (#26 D4).
+  const launchApplied = applyWhenRead(sync.start(settings.syncFolder(), state.load())).then(() => {
+    if (watcher === null) watchFolder(sync.folderPath())
+  })
   app.on('browser-window-focus', readNow)
 
   const fromMainFrame = (event: IpcMainInvokeEvent): boolean =>
     event.senderFrame !== null && event.senderFrame === event.sender.mainFrame
 
-  /** Keeps `folder` in the settings and joins the boards, handing a joined board to `sender`. */
-  const applyFolder = (folder: string | null, sender: WebContents): void => {
+  /**
+   * Joins the boards, handing a joined board to `sender`, and keeps `folder` in the settings once
+   * the queued set-folder operation has finished (#26 D6): one that never runs (stuck behind a
+   * stalled old folder at quit) leaves the old folder in the settings.
+   */
+  const applyFolder = async (folder: string | null, sender: WebContents): Promise<void> => {
+    const joined = await sync.setFolder(folder, state.load())
     settings.setSyncFolder(folder)
-    const joined = sync.setFolder(folder, state.load())
     watchFolder(sync.folderPath())
-    if (joined !== null) sender.send(IPC.syncBoard, joined)
+    if (joined !== null && !sender.isDestroyed()) sender.send(IPC.syncBoard, joined)
   }
 
   const setFolder = async (path: unknown, sender: WebContents): Promise<SyncFolderResult> => {
     if (path === null) {
-      applyFolder(null, sender)
+      await applyFolder(null, sender)
       return { ok: true }
     }
     // The settings file's own check (D10), so a folder kept now is still accepted at next launch.
     if (!isSyncFolderPath(path) || !(await isDirectory(path))) {
       return { ok: false, reason: 'not found' }
     }
-    applyFolder(path, sender)
+    await applyFolder(path, sender)
     return { ok: true }
   }
 
@@ -189,9 +214,12 @@ export function registerSync(state: MainState, settings: MainSettings): MainSync
   return {
     noteBoard: (next) => sync.noteBoard(next),
     flush: () => {
-      sync.flush()
+      stopped = true
       stopRetry()
       unwatch()
-    }
+      return sync.flush()
+    },
+    busy: () => sync.busy(),
+    launched: boundedWait(launchApplied, SYNC_LAUNCH_WAIT_MS)
   }
 }
