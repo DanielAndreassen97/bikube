@@ -27,6 +27,7 @@ function card(id: string, columnId: string, over: Partial<Card> = {}): Card {
     startup: { kind: 'claude' },
     agentSessionId: `${id}-session`,
     claudeStarted: false,
+    startedAgents: [],
     ...over
   }
 }
@@ -53,6 +54,30 @@ describe("keeping this machine's claudeStarted (#13 D6, AC6)", () => {
       ['known', true],
       ['fresh', false],
       ['ssh', true]
+    ])
+  })
+})
+
+describe("keeping this machine's startedAgents (#21 D7, AC9)", () => {
+  it('keeps the local value for local cards this machine has, empty for new ones, the file’s for SSH', () => {
+    const local = workspace('api', {
+      cards: [
+        card('known', 'api-backlog', { startedAgents: ['codex'] }),
+        card('ssh', 'api-backlog', { host: 'devbox', startedAgents: [] })
+      ]
+    })
+    const incoming = workspace('api', {
+      cards: [
+        card('known', 'api-backlog', { startedAgents: ['gemini'] }),
+        card('fresh', 'api-backlog', { startedAgents: ['codex'] }),
+        card('ssh', 'api-backlog', { host: 'devbox', startedAgents: ['opencode'] })
+      ]
+    })
+    const [api] = applySyncBoard([incoming], [local], none)
+    expect(api.cards.map((c) => [c.id, c.startedAgents])).toEqual([
+      ['known', ['codex']],
+      ['fresh', []],
+      ['ssh', ['opencode']]
     ])
   })
 })
