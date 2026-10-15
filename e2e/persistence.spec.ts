@@ -12,7 +12,8 @@ import {
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { claudeLogLines, fakeClaudeHome } from './fake-claude'
+import { claudeLogLines, fakeClaudeHome, SETTINGS_ARGS, claudeResumeLine } from './fake-claude'
+import { backToBoard, expectCardOpen, expectStatusOnBoard } from './card-view'
 import { launchApp, newDataDir, removeDataDirs } from './launch'
 
 // Persistence (#8): the board survives a restart. Each test launches with its own data directory
@@ -142,17 +143,17 @@ async function newCard(
     await page.getByTestId('new-card-input').press('Enter')
   }
   await expect(page.getByTestId('card-view')).toBeVisible()
-  if (title) await expect(page.getByTestId('card-view-title')).toHaveText(title)
+  if (title) await expectCardOpen(page, title)
   await back()
 }
 
 async function openCard(title: string): Promise<void> {
   await card(title).getByTestId('card-open').click()
-  await expect(page.getByTestId('card-view-title')).toHaveText(title)
+  await expectCardOpen(page, title)
 }
 
 async function back(): Promise<void> {
-  await page.getByTestId('card-back').click()
+  await backToBoard(page)
   await expect(page.getByTestId('board')).toBeVisible()
 }
 
@@ -322,25 +323,25 @@ test('AC4: opening restored cards starts them; Claude Code resumes its session',
   await newCard('Backlog', 'agent', { label: 'Claude Code' })
   await expect.poll(() => claudeLogLines(claudeLog)).toHaveLength(1)
   const [first] = claudeLogLines(claudeLog)
-  expect(first).toMatch(/^--session-id /)
-  const u = first.slice('--session-id '.length)
+  expect(first.startsWith(`${SETTINGS_ARGS} --session-id `)).toBe(true)
+  const u = first.slice(`${SETTINGS_ARGS} --session-id `.length)
 
   await restart()
 
   await openCard('sh')
-  await expect(page.getByTestId('card-view').getByTestId('card-status-label')).toHaveText('Running')
+  await expectStatusOnBoard(page, 'sh', 'Running')
   await run('pwd')
   await expect.poll(bufferLines).toContain(alpha)
   await back()
 
   await openCard('agent')
-  await expect.poll(bufferLines).toContain(`fake-claude --resume ${u}`)
-  expect(claudeLogLines(claudeLog).at(-1)).toBe(`--resume ${u}`)
+  await expect.poll(bufferLines).toContain(`fake-claude ${SETTINGS_ARGS} --resume ${u}`)
+  expect(claudeLogLines(claudeLog).at(-1)).toBe(`${SETTINGS_ARGS} --resume ${u}`)
   // The typed line, from the shell's history: its echo on screen can be garbled when bash's
   // readline wraps it at the width the PTY had before the view was fitted.
   await page.keyboard.press('Enter')
   await run('fc -ln -1')
-  await expect.poll(bufferLines).toContain(`claude --resume ${u} || claude --session-id ${u}`)
+  await expect.poll(bufferLines).toContain(claudeResumeLine(u))
 })
 
 test('AC5: default titles continue and new items work alongside restored ones', async () => {
@@ -453,6 +454,24 @@ test('AC8: the app opens on the board, not the card that was open', async () => 
   await expect(page.getByTestId('board')).toBeVisible()
   await expect(page.getByTestId('card-view')).toHaveCount(0)
   await expect(page.getByTestId('board-title')).toHaveText('alpha')
+  await expect(status('api')).toHaveText('Stopped')
+})
+
+test('#31 AC18: after a restart no workspace comes back to the card open in it', async () => {
+  await launch()
+  await createWorkspace(makeDir('alpha'), 'alpha')
+  await createWorkspace(makeDir('beta'), 'beta')
+  await selectWorkspace('alpha')
+  await newCard('Backlog', 'api')
+  await openCard('api')
+  // alpha remembers `api` while beta is active, until the app quits (#31 D19).
+  await selectWorkspace('beta')
+
+  await restart()
+
+  await expect(page.getByTestId('board-title')).toHaveText('beta')
+  await selectWorkspace('alpha')
+  await expect(page.getByTestId('card-view')).toHaveCount(0)
   await expect(status('api')).toHaveText('Stopped')
 })
 

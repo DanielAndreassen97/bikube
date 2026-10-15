@@ -2,6 +2,7 @@ import { expect, test, type ElectronApplication, type Locator, type Page } from 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { backToBoard, expectCardOpen, expectStatusOnBoard } from './card-view'
 import { launchApp, newDataDir, removeDataDirs } from './launch'
 
 // Themes and settings (#10). Each test launches with its own data directory.
@@ -30,7 +31,7 @@ async function alphaWithApi(page: Page): Promise<void> {
   await page.getByTestId('column').first().getByTestId('new-card').click()
   await page.getByTestId('new-card-input').fill('api')
   await page.getByTestId('new-card-input').press('Enter')
-  await expect(page.getByTestId('card-view-title')).toHaveText('api')
+  await expectCardOpen(page, 'api')
 }
 
 /** The open card's terminal buffer, one trimmed string per line. */
@@ -369,7 +370,7 @@ test('AC3: picking Light recolours the board at once, Dark restores it, and api 
   await expect(dialog(page)).toBeVisible()
   await expect.poll(() => boardColours(page)).toEqual(LIGHT)
   await expect.poll(() => terminalColours(page)).toEqual(LIGHT_TERMINAL)
-  await expect(page.getByTestId('card-view').getByTestId('card-status-label')).toHaveText('Running')
+  await expect(page.getByTestId('card-view')).toBeVisible()
   expect(await bufferLines(page)).toEqual(scrollback)
 
   await dialog(page).getByRole('radio', { name: 'Dark' }).check()
@@ -377,7 +378,7 @@ test('AC3: picking Light recolours the board at once, Dark restores it, and api 
   await expect.poll(() => terminalColours(page)).toEqual(DARK_TERMINAL)
 
   await page.keyboard.press('Escape')
-  await expect(page.getByTestId('card-view').getByTestId('card-status-label')).toHaveText('Running')
+  await expectStatusOnBoard(page, 'api', 'Running')
   expect(await bufferLines(page)).toEqual(scrollback)
 })
 
@@ -408,12 +409,12 @@ test('with theme System the terminals follow the OS appearance live, open or not
   await expect.poll(() => terminalColours(page)).toEqual(LIGHT_TERMINAL)
 
   // A card on the board, not shown, recolours too: switch while it is closed, then open it.
-  await page.getByTestId('card-back').click()
+  await backToBoard(page)
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.getByTestId('card').filter({ hasText: 'api' }).getByTestId('card-open').click()
-  await expect(page.getByTestId('card-view-title')).toHaveText('api')
+  await expectCardOpen(page, 'api')
   await expect.poll(() => terminalColours(page)).toEqual(DARK_TERMINAL)
-  await expect(page.getByTestId('card-view').getByTestId('card-status-label')).toHaveText('Running')
+  await expectStatusOnBoard(page, 'api', 'Running')
 })
 
 test('AC5: font size 18 applies at once, refits the open terminal and resizes its shell', async () => {
@@ -455,9 +456,9 @@ test('AC5: font size 18 applies at once, refits the open terminal and resizes it
 
 /** Goes back to the board and opens `title` at full size. */
 async function openCard(page: Page, title: string): Promise<void> {
-  await page.getByTestId('card-back').click()
+  await backToBoard(page)
   await page.getByTestId('card').filter({ hasText: title }).getByTestId('card-open').click()
-  await expect(page.getByTestId('card-view-title')).toHaveText(title)
+  await expectCardOpen(page, title)
 }
 
 test('AC6: the trimmed family applies to every terminal; clearing it restores the default', async () => {
@@ -466,11 +467,11 @@ test('AC6: the trimmed family applies to every terminal; clearing it restores th
   const { page } = launched
   await alphaWithApi(page)
   // A second card, web, left on the board while api is open.
-  await page.getByTestId('card-back').click()
+  await backToBoard(page)
   await page.getByTestId('column').first().getByTestId('new-card').click()
   await page.getByTestId('new-card-input').fill('web')
   await page.getByTestId('new-card-input').press('Enter')
-  await expect(page.getByTestId('card-view-title')).toHaveText('web')
+  await expectCardOpen(page, 'web')
   await openCard(page, 'api')
 
   await page.keyboard.press(SHORTCUT)
@@ -615,7 +616,7 @@ test('AC7: Light, size 16 and Courier New are kept across a restart, and the boa
 
   // api's terminal, started again on opening it, uses the kept look.
   await page.getByTestId('card').filter({ hasText: 'api' }).getByTestId('card-open').click()
-  await expect(page.getByTestId('card-view-title')).toHaveText('api')
+  await expectCardOpen(page, 'api')
   await expect
     .poll(() => openLook(page))
     .toMatchObject({
@@ -652,7 +653,7 @@ test('AC8: invalid fields take their defaults, the rest is kept, and the next ch
   // The app works: a workspace and a running card.
   await page.keyboard.press('Escape')
   await alphaWithApi(page)
-  await expect(page.getByTestId('card-view').getByTestId('card-status-label')).toHaveText('Running')
+  await expectStatusOnBoard(page, 'api', 'Running')
 })
 
 test('AC8: a settings file that is not JSON gives all defaults', async () => {
@@ -666,4 +667,210 @@ test('AC8: a settings file that is not JSON gives all defaults', async () => {
   await expect(dialog(page).getByRole('radio', { name: 'System' })).toBeChecked()
   await expect(dialog(page).getByLabel('Font size')).toHaveValue('13')
   await expect(dialog(page).getByLabel('Font family')).toHaveValue('')
+})
+
+// Configurable shortcuts (#31 D8, D9). The ACs name the Linux defaults.
+
+const shortcutField = (page: Page, action: string): Locator =>
+  dialog(page).getByTestId(`settings-shortcut-${action}`)
+const shortcutReset = (page: Page, action: string): Locator =>
+  dialog(page).getByTestId(`settings-shortcut-reset-${action}`)
+const shortcutError = (page: Page, action: string): Locator =>
+  dialog(page).getByTestId(`settings-shortcut-error-${action}`)
+
+/** The open card's panes. */
+const cardPanes = (page: Page): Locator => page.getByTestId('card-view').getByTestId('pane')
+
+test('#31 AC8: a bad shortcut falls back to its default; the rest of the file is kept', async () => {
+  test.skip(process.platform === 'darwin', 'the AC names the Linux defaults')
+  const dataDir = newDataDir()
+  writeFileSync(
+    join(dataDir, 'drovr-settings.json'),
+    JSON.stringify({
+      version: 1,
+      settings: {
+        theme: 'dark',
+        fontSize: 13,
+        fontFamily: 'Menlo',
+        shortcuts: {
+          back: 'B',
+          splitRight: 'Ctrl+Alt+R',
+          closePane: 'Ctrl+Alt+R',
+          // A fixed shortcut, refused by the recorder, is refused in the file too (round 4 Q4).
+          settings: 'Ctrl+Shift+C',
+          bogus: 'Ctrl+K'
+        }
+      }
+    })
+  )
+  const launched = await launchApp({ dataDir })
+  app = launched.app
+  const { page } = launched
+
+  await page.getByTestId('settings-open').click()
+  await expect(dialog(page).getByRole('radio', { name: 'Dark' })).toBeChecked()
+  await expect(shortcutField(page, 'back')).toHaveText('Ctrl+Shift+B')
+  await expect(shortcutField(page, 'splitRight')).toHaveText('Ctrl+Shift+D')
+  await expect(shortcutField(page, 'closePane')).toHaveText('Ctrl+Shift+W')
+  await expect(shortcutField(page, 'settings')).toHaveText('Ctrl+,')
+  for (const action of ['back', 'splitRight', 'splitDown', 'closePane', 'closeCard', 'settings']) {
+    await expect(shortcutReset(page, action)).toBeDisabled()
+  }
+  await expect(dialog(page).getByRole('group', { name: 'Shortcuts' })).toContainText(
+    'Open Settings'
+  )
+})
+
+test('#31 D8: Reset is refused while another action holds the default; the value stays', async () => {
+  const dataDir = newDataDir()
+  const launched = await launchApp({ dataDir })
+  app = launched.app
+  const { page } = launched
+  // Close card's default as a Playwright press, per OS (e2e/card-view.ts).
+  const closeCardDefault = process.platform === 'darwin' ? 'Meta+Shift+W' : 'Control+Shift+Q'
+
+  await page.getByTestId('settings-open').click()
+  const defaultText = await shortcutField(page, 'closeCard').innerText()
+  // Close card moves away, then Split right takes Close card's default, free by then.
+  await shortcutField(page, 'closeCard').click()
+  await page.keyboard.press('Control+Alt+X')
+  const movedText = await shortcutField(page, 'closeCard').innerText()
+  expect(movedText).not.toBe(defaultText)
+  await shortcutField(page, 'splitRight').click()
+  await page.keyboard.press(closeCardDefault)
+  await expect(shortcutField(page, 'splitRight')).toHaveText(defaultText)
+
+  await shortcutReset(page, 'closeCard').click()
+  await expect(shortcutError(page, 'closeCard')).toHaveText('Already used by Split right')
+  await expect(shortcutField(page, 'closeCard')).toHaveText(movedText)
+  await expect(shortcutField(page, 'splitRight')).toHaveText(defaultText)
+
+  // Once Split right is reset, Close card's Reset applies and the refusal is gone.
+  await shortcutReset(page, 'splitRight').click()
+  await shortcutReset(page, 'closeCard').click()
+  await expect(shortcutError(page, 'closeCard')).toHaveCount(0)
+  await expect(shortcutField(page, 'closeCard')).toHaveText(defaultText)
+  await expect(shortcutReset(page, 'closeCard')).toBeDisabled()
+})
+
+test('#31 AC7: refused presses keep the old shortcut and recording; Escape stops it without a change', async () => {
+  test.skip(process.platform === 'darwin', 'the AC names the Linux defaults')
+  const dataDir = newDataDir()
+  const launched = await launchApp({ dataDir })
+  app = launched.app
+  const { page } = launched
+
+  await page.getByTestId('settings-open').click()
+  const field = shortcutField(page, 'splitRight')
+  await field.click()
+  await expect(field).toHaveText('Press a shortcut…')
+  await expect(field).toHaveAttribute('data-recording', 'true')
+
+  const refusals: [string, string][] = [
+    ['r', 'Use Ctrl or Alt with a key'],
+    ['Control+Shift+B', 'Already used by Back to board'],
+    ['Control+Shift+C', 'Already used by Copy'],
+    ['Alt+ArrowUp', 'Already used by Move card'],
+    ['Control+1', 'Already used by Switch workspace'],
+    // The app menu's accelerators (round 4 Q3); the recorder swallows the press, so no reload.
+    ['Control+R', 'Already used by Reload']
+  ]
+  for (const [press, message] of refusals) {
+    await page.keyboard.press(press)
+    await expect(shortcutError(page, 'splitRight')).toHaveText(message)
+    await expect(field).toHaveText('Ctrl+Shift+D')
+    await expect(field).toHaveAttribute('data-recording', 'true')
+  }
+  // A modifier alone keeps recording, as it was.
+  await page.keyboard.press('Control')
+  await expect(field).toHaveAttribute('data-recording', 'true')
+
+  await page.keyboard.press('Escape')
+  await expect(dialog(page)).toBeVisible()
+  await expect(field).toHaveAttribute('data-recording', 'false')
+  await expect(field).toHaveText('Ctrl+Shift+D')
+  await expect(shortcutError(page, 'splitRight')).toHaveCount(0)
+  await expect(shortcutReset(page, 'splitRight')).toBeDisabled()
+  await page.waitForTimeout(500)
+  expect(existsSync(join(dataDir, 'drovr-settings.json'))).toBe(false)
+})
+
+test('#31 AC6: a recorded shortcut works in a card, is kept across a restart, and Reset restores the default', async () => {
+  test.skip(process.platform === 'darwin', 'the AC names the Linux defaults')
+  const dataDir = newDataDir()
+  let launched = await launchApp({ dataDir })
+  app = launched.app
+  let page = launched.page
+  await alphaWithApi(page)
+  await settledBufferLines(page, '')
+
+  await page.keyboard.press(SHORTCUT)
+  await shortcutField(page, 'splitRight').click()
+  await page.keyboard.press('Control+Alt+R')
+  await expect(shortcutField(page, 'splitRight')).toHaveText('Ctrl+Alt+R')
+  await expect(shortcutField(page, 'splitRight')).toHaveAttribute('data-recording', 'false')
+  await expect(shortcutReset(page, 'splitRight')).toBeEnabled()
+  await dialog(page).getByRole('button', { name: 'Done' }).click()
+  await expect(dialog(page)).toHaveCount(0)
+
+  await expect.poll(() => terminalFocused(page)).toBe(true)
+  await page.keyboard.press('Control+Alt+R')
+  await expect(cardPanes(page)).toHaveCount(2)
+  await expect(cardPanes(page).nth(1)).toHaveAttribute('data-focused', 'true')
+  // Ctrl+Shift+D no longer splits: the key reaches the page past the app's capture listener
+  // (which swallows a shortcut whole) and the focused pane's terminal, which stays usable.
+  await page.keyboard.type('echo pane-$((2+3))')
+  await page.keyboard.press('Enter')
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          document
+            .querySelectorAll('[data-testid=card-view] [data-testid=pane]')[1]
+            ?.querySelector('.xterm-rows')
+            ?.textContent?.includes('pane-5') ?? false
+      )
+    )
+    .toBe(true)
+  await page.evaluate(() => {
+    const seen: string[] = []
+    ;(window as unknown as { seenKeys: string[] }).seenKeys = seen
+    document.addEventListener('keydown', (event) => seen.push(event.key), true)
+  })
+  await page.keyboard.press('Control+Shift+D')
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { seenKeys: string[] }).seenKeys))
+    .toContain('D')
+  await page.waitForTimeout(300)
+  await expect(cardPanes(page)).toHaveCount(2)
+  await page.keyboard.type('echo after-$((3+4))')
+  await page.keyboard.press('Enter')
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          document
+            .querySelectorAll('[data-testid=card-view] [data-testid=pane]')[1]
+            ?.querySelector('.xterm-rows')
+            ?.textContent?.includes('after-7') ?? false
+      )
+    )
+    .toBe(true)
+
+  await app.close()
+  expect(readSettingsFile(dataDir)).toContain('"shortcuts":{"splitRight":"Ctrl+Alt+R"}')
+
+  launched = await launchApp({ dataDir })
+  app = launched.app
+  page = launched.page
+  await page.getByTestId('settings-open').click()
+  await expect(shortcutField(page, 'splitRight')).toHaveText('Ctrl+Alt+R')
+  await shortcutReset(page, 'splitRight').click()
+  await expect(shortcutField(page, 'splitRight')).toHaveText('Ctrl+Shift+D')
+  await expect(shortcutReset(page, 'splitRight')).toBeDisabled()
+  await expect
+    .poll(() => readSettingsFile(dataDir))
+    .toBe(
+      '{"version":1,"settings":{"theme":"system","fontSize":13,"fontFamily":"Menlo, Consolas, monospace","shell":"","terminalThemeDark":"Drovr Dark","terminalThemeLight":"Drovr Light","useGhosttyTheme":false}}'
+    )
 })

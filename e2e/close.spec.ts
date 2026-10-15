@@ -2,12 +2,13 @@ import { expect, test, type ElectronApplication, type Locator, type Page } from 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { backToBoard, closeCard, expectCardOpen, expectStatusOnBoard } from './card-view'
 import { launchApp, removeDataDirs } from './launch'
-import { claudeLogLines, fakeClaudeHome } from './fake-claude'
+import { claudeLogLines, fakeClaudeHome, SETTINGS_ARGS, claudeResumeLine } from './fake-claude'
 
-// Close card (#7): from the card menu and the full-size header, with a confirmation; the card
-// stays where it is as Stopped and resumes when opened. Electron runs with the fake `claude`
-// of #5's smoke tests on the login PATH.
+// Close card (#7): from the card menu and the full-size view (its shortcut, #31), with a
+// confirmation; the card stays where it is as Stopped and resumes when opened. Electron runs
+// with the fake `claude` of #5's smoke tests on the login PATH.
 
 let app: ElectronApplication
 let page: Page
@@ -65,16 +66,16 @@ async function newCard(columnName: string, title: string, startup?: 'Claude Code
   await page.getByTestId('new-card-input').fill(title)
   if (startup) await page.getByTestId('new-card-startup').selectOption({ label: startup })
   await page.getByTestId('new-card-input').press('Enter')
-  await expect(page.getByTestId('card-view-title')).toHaveText(title)
+  await expectCardOpen(page, title)
 }
 
 async function openCard(title: string): Promise<void> {
   await card(title).getByTestId('card-open').click()
-  await expect(page.getByTestId('card-view-title')).toHaveText(title)
+  await expectCardOpen(page, title)
 }
 
 async function back(): Promise<void> {
-  await page.getByTestId('card-back').click()
+  await backToBoard(page)
   await expect(page.getByTestId('board')).toBeVisible()
 }
 
@@ -205,14 +206,13 @@ test('AC2: Cancel or Esc in the Close dialog changes nothing', async () => {
   expect(alive(pid)).toBe(true)
 })
 
-test('AC3: Close from the full-size header goes back to the board with the card Stopped', async () => {
+test('AC3: Close from the full-size view goes back to the board with the card Stopped', async () => {
   await createWorkspace(makeDir('alpha'), 'alpha')
   await newCard('Running', 'api')
   const pid = await shellPid()
 
   const view = page.getByTestId('card-view')
-  await expect(view.getByTestId('card-close')).toHaveText('Close')
-  await view.getByTestId('card-close').click()
+  await closeCard(page)
   const dialog = page.getByTestId('confirm-dialog')
   await expect(dialog.getByRole('heading')).toHaveText('Close card')
   await expect(dialog.locator('.modal-message')).toHaveText(CLOSE_MESSAGE)
@@ -226,12 +226,43 @@ test('AC3: Close from the full-size header goes back to the board with the card 
   await expect(view).toBeVisible()
   expect(alive(pid)).toBe(true)
 
-  await view.getByTestId('card-close').click()
+  await closeCard(page)
   await confirmClose()
   await expect(page.getByTestId('board')).toBeVisible()
   await expect(page.getByTestId('card-view')).toHaveCount(0)
   await expect(status('api')).toHaveText('Stopped')
   await expect.poll(() => alive(pid)).toBe(false)
+})
+
+test('#31 AC9: the stop button on the board asks, closes the card, and never opens it', async () => {
+  await createWorkspace(makeDir('alpha'), 'alpha')
+  await newCard('Running', 'api')
+  const pid = await shellPid()
+  await back()
+
+  const stop = card('api').getByTestId('card-stop')
+  await expect(stop).toHaveAccessibleName('Close')
+  await expect(stop).toHaveAttribute('title', 'Close')
+  await stop.click()
+  const dialog = page.getByTestId('confirm-dialog')
+  await expect(dialog.getByRole('heading')).toHaveText('Close card')
+  await expect(dialog.locator('.modal-message')).toHaveText(CLOSE_MESSAGE)
+  await expect(page.getByTestId('board')).toBeVisible()
+  await expect(page.getByTestId('card-view')).toHaveCount(0)
+
+  await confirmClose()
+  await expect(status('api')).toHaveText('Stopped')
+  await expect(card('api').getByTestId('card-stop')).toHaveCount(0)
+  await expect(page.getByTestId('card-view')).toHaveCount(0)
+  await expect.poll(() => alive(pid)).toBe(false)
+
+  // Clicking the card opens it and starts it again.
+  await openCard('api')
+  const next = await shellPid()
+  expect(next).not.toBe(pid)
+  await back()
+  await expect(status('api')).toHaveText('Running')
+  await expect(card('api').getByTestId('card-stop')).toBeVisible()
 })
 
 test('AC4: a closed card resumes with its startup command when opened again', async () => {
@@ -240,9 +271,9 @@ test('AC4: a closed card resumes with its startup command when opened again', as
   await newCard('Backlog', 'agent', 'Claude Code')
   await expect.poll(logLines).toHaveLength(1)
   const [first] = logLines()
-  expect(first).toMatch(/^--session-id /)
-  const u = first.slice('--session-id '.length)
-  await expect.poll(bufferLines).toContain(`fake-claude --session-id ${u}`)
+  expect(first.startsWith(`${SETTINGS_ARGS} --session-id `)).toBe(true)
+  const u = first.slice(`${SETTINGS_ARGS} --session-id `.length)
+  await expect.poll(bufferLines).toContain(`fake-claude ${SETTINGS_ARGS} --session-id ${u}`)
   await back()
 
   await menuClose('agent')
@@ -250,20 +281,20 @@ test('AC4: a closed card resumes with its startup command when opened again', as
   await expect(status('agent')).toHaveText('Stopped')
 
   await openCard('agent')
-  const resume = `claude --resume ${u} || claude --session-id ${u}`
-  await expect.poll(bufferLines).toContain(`fake-claude --resume ${u}`)
+  const resume = claudeResumeLine(u)
+  await expect.poll(bufferLines).toContain(`fake-claude ${SETTINGS_ARGS} --resume ${u}`)
   expect((await bufferLines()).some((l) => l.endsWith(resume))).toBe(true)
-  expect(logLines().at(-1)).toBe(`--resume ${u}`)
+  expect(logLines().at(-1)).toBe(`${SETTINGS_ARGS} --resume ${u}`)
   await back()
 
   // A closed Shell card opened again runs a new shell in the card's directory.
   await newCard('Backlog', 'api')
   const pid = await shellPid()
-  await page.getByTestId('card-close').click()
+  await closeCard(page)
   await confirmClose()
   await expect(status('api')).toHaveText('Stopped')
   await openCard('api')
-  await expect(page.getByTestId('card-view').getByTestId('card-status-label')).toHaveText('Running')
+  await expectStatusOnBoard(page, 'api', 'Running')
   await run('pwd')
   await expect.poll(bufferLines).toContain(dir)
   expect(await shellPid()).not.toBe(pid)
@@ -280,11 +311,13 @@ test("AC5: Close isn't offered for a Stopped card or one that couldn't start", a
   rmSync(dir, { recursive: true })
   await newCard('Backlog', 'x')
   const reason = "Couldn't start: working directory not found"
-  const view = page.getByTestId('card-view')
-  await expect(view.getByTestId('card-status-label')).toHaveText(reason)
-  await expect(view.getByTestId('card-back')).toBeVisible()
-  await expect(view.getByTestId('card-close')).toHaveCount(0)
+  // The Close card shortcut does nothing on a card that isn't running (#31 D5).
+  await page.waitForTimeout(500)
+  await closeCard(page)
+  await page.waitForTimeout(300)
+  await expect(page.getByTestId('confirm-dialog')).toHaveCount(0)
   await back()
+  await expect(status('x')).toHaveText(reason)
 
   for (const title of ['old', 'x']) {
     await openMenu(title)

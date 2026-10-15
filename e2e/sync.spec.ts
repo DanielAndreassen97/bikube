@@ -17,8 +17,9 @@ import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { addFakeAgents, agentLogLines } from './fake-agents'
-import { claudeLogLines } from './fake-claude'
+import { claudeLogLines, REMOTE_SETTINGS_ARGS, SETTINGS_ARGS } from './fake-claude'
 import { fakeSshHome, removeRemoteForwards } from './fake-ssh'
+import { backToBoard, expectCardOpen } from './card-view'
 import { launchApp, newDataDir, removeDataDirs } from './launch'
 
 // Sync between machines (#13). Every instance has its own data directory and its own home
@@ -87,7 +88,7 @@ async function createCard(page: Page): Promise<void> {
   await page.getByTestId('column').first().getByTestId('new-card').click()
   await page.getByTestId('new-card-input').press('Enter')
   await expect(page.getByTestId('card-view')).toBeVisible()
-  await page.getByTestId('card-back').click()
+  await backToBoard(page)
   await expect(page.getByTestId('card-view')).toHaveCount(0)
 }
 
@@ -337,8 +338,8 @@ async function newCard(
   await page.getByTestId('new-card-input').fill(title)
   if (startup) await page.getByTestId('new-card-startup').selectOption({ label: startup })
   await page.getByTestId('new-card-input').press('Enter')
-  await expect(page.getByTestId('card-view-title')).toHaveText(title)
-  await page.getByTestId('card-back').click()
+  await expectCardOpen(page, title)
+  await backToBoard(page)
   await expect(page.getByTestId('board')).toBeVisible()
 }
 
@@ -415,7 +416,7 @@ test('AC4: deletions win, but a card running on B stays and is written back to A
 
   // Start `two` on B and read its shell's pid.
   await card(b.page, 'two').getByTestId('card-open').click()
-  await expect(b.page.getByTestId('card-view-title')).toHaveText('two')
+  await expectCardOpen(b.page, 'two')
   const pidFile = join(root, 'pid-two')
   await expect
     .poll(() =>
@@ -431,7 +432,7 @@ test('AC4: deletions win, but a card running on B stays and is written back to A
     .poll(() => existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim() !== '')
     .toBe(true)
   const pid = Number(readFileSync(pidFile, 'utf8').trim())
-  await b.page.getByTestId('card-back').click()
+  await backToBoard(b.page)
   await expect(card(b.page, 'two').getByTestId('card-status-label')).toHaveText('Running')
 
   await deleteCard(a.page, 'one')
@@ -446,6 +447,45 @@ test('AC4: deletions win, but a card running on B stays and is written back to A
   await a.page.waitForTimeout(500)
   expect(alive(pid)).toBe(true)
   await expect(card(b.page, 'two').getByTestId('card-status-label')).toHaveText('Running')
+})
+
+test('#31 AC18: a card deleted by sync while its workspace is away is forgotten there', async () => {
+  const folder = makeDir('F')
+  const { a, b } = await twoSynced(folder)
+  makeDir('hb', 'beta')
+  await createWorkspace(a.page, makeDir('ha', 'beta'), 'beta')
+  await selectWorkspace(a.page, 'api')
+  await newCard(a.page, 'one')
+  await expect.poll(() => workspaceNames(b.page)).toEqual(['api', 'beta'])
+  await selectWorkspace(b.page, 'api')
+  await expect(card(b.page, 'one')).toHaveCount(1)
+
+  // B opens `one` and leaves it open; a running card on B outlives a deletion on A (#13 D8), so
+  // its shell ends first.
+  await card(b.page, 'one').getByTestId('card-open').click()
+  await expectCardOpen(b.page, 'one')
+  await expect
+    .poll(() =>
+      b.page.evaluate(
+        () =>
+          document.activeElement?.closest('[data-testid=card-view] [data-testid=terminal]') != null
+      )
+    )
+    .toBe(true)
+  await b.page.keyboard.type('sleep 1; exit')
+  await b.page.keyboard.press('Enter')
+  await selectWorkspace(b.page, 'beta')
+  await b.page.waitForTimeout(2000)
+
+  await deleteCard(a.page, 'one')
+  await expect
+    .poll(() => readSyncFile(folder)?.board.workspaces.find((w) => w.name === 'api')?.cards.length)
+    .toBe(0)
+  await b.page.waitForTimeout(1000)
+  await selectWorkspace(b.page, 'api')
+  await expect(b.page.getByTestId('card-view')).toHaveCount(0)
+  await expect(b.page.getByTestId('board')).toBeVisible()
+  await expect(card(b.page, 'one')).toHaveCount(0)
 })
 
 test('AC5: a workspace created on A reaches B live under its own home; SSH unchanged', async () => {
@@ -521,13 +561,16 @@ test("AC6: B starts A's local Claude Code card with --session-id and its SSH one
   await card(b.page, 'local').getByTestId('card-open').click()
   await expect
     .poll(() => claudeLogLines(fakeB.log), { timeout: 15_000 })
-    .toEqual([`--session-id ${id('local')}`])
-  await b.page.getByTestId('card-back').click()
+    .toEqual([`${SETTINGS_ARGS} --session-id ${id('local')}`])
+  await backToBoard(b.page)
   await selectWorkspace(b.page, 'remote')
   await card(b.page, 'ssh').getByTestId('card-open').click()
   await expect
     .poll(() => claudeLogLines(fakeB.log), { timeout: 15_000 })
-    .toEqual([`--session-id ${id('local')}`, `--resume ${id('ssh')}`])
+    .toEqual([
+      `${SETTINGS_ARGS} --session-id ${id('local')}`,
+      expect.stringMatching(new RegExp(`^${REMOTE_SETTINGS_ARGS} --resume ${id('ssh')}$`))
+    ])
 })
 
 /** The open card's terminal buffer on `page`, one trimmed string per line, wrapped lines joined. */
@@ -605,7 +648,7 @@ test("#21 AC9: B starts A's local Codex card fresh and resumes its SSH one", asy
   await expect.poll(() => agentLogLines(logB), { timeout: 15_000 }).toEqual(['codex'])
   await expect.poll(() => bufferLines(b.page)).toContain('fake-codex')
   expect((await bufferLines(b.page)).join('\n')).not.toContain('resume')
-  await b.page.getByTestId('card-back').click()
+  await backToBoard(b.page)
   await selectWorkspace(b.page, 'remote')
   await card(b.page, 'ssh').getByTestId('card-open').click()
   await expect
@@ -826,7 +869,7 @@ test("#26 AC1: a stalled sync file freezes nothing, and this machine's changed b
     await b.page.keyboard.type('echo ok-$((40+3))')
     await b.page.keyboard.press('Enter')
     await expect.poll(() => bufferLines(b.page), { timeout: 5000 }).toContain('ok-43')
-    await b.page.getByTestId('card-back').click()
+    await backToBoard(b.page)
     expect(await workspaceNames(b.page)).toEqual(['api'])
     await expect(b.page.getByTestId('sync-status')).toHaveCount(0)
 

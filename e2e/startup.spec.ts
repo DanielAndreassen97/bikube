@@ -9,8 +9,17 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { backToBoard, checkOnBoard, expectCardOpen, expectStatusOnBoard } from './card-view'
 import { launchApp, removeDataDirs } from './launch'
-import { claudeLogLines, fakeClaudeHome } from './fake-claude'
+import {
+  claudeLogLines,
+  fakeClaudeHome,
+  SETTINGS_ARGS,
+  claudeFirstLine,
+  claudeResumeLine,
+  LOCAL_CLAUDE_SETTINGS
+} from './fake-claude'
+import { CLAUDE_INSTRUCTION } from '../src/core/claude-hooks'
 
 // Startup commands (#5): choosing one at creation, the workspace default, changing a card's,
 // and the Claude Code resume. Electron runs with SHELL=/bin/bash and HOME set to a temp
@@ -86,16 +95,16 @@ async function newCard(
   } else {
     await page.getByTestId('new-card-input').press('Enter')
   }
-  await expect(page.getByTestId('card-view-title')).toHaveText(title)
+  await expectCardOpen(page, title)
 }
 
 async function openCard(title: string): Promise<void> {
   await card(title).getByTestId('card-open').click()
-  await expect(page.getByTestId('card-view-title')).toHaveText(title)
+  await expectCardOpen(page, title)
 }
 
 async function back(): Promise<void> {
-  await page.getByTestId('card-back').click()
+  await backToBoard(page)
   await expect(page.getByTestId('board')).toBeVisible()
 }
 
@@ -145,8 +154,6 @@ async function run(command: string): Promise<void> {
   await page.keyboard.press('Enter')
 }
 
-const viewStatus = (): Locator => page.getByTestId('card-view').getByTestId('card-status-label')
-
 /** Waits for the board after the open card's shell exited: it is Stopped (#5 D6). */
 async function stoppedToBoard(title: string): Promise<void> {
   await expect(page.getByTestId('board')).toBeVisible()
@@ -162,8 +169,8 @@ test('AC1: a new card is a Shell by default, nothing typed, no tag', async () =>
   await expect(selected(page.getByTestId('new-card-startup'))).toHaveText('Shell')
   await page.getByTestId('new-card-input').fill('sh')
   await page.getByTestId('new-card-input').press('Enter')
-  await expect(page.getByTestId('card-view-title')).toHaveText('sh')
-  await expect(viewStatus()).toHaveText('Running')
+  await expectCardOpen(page, 'sh')
+  await expectStatusOnBoard(page, 'sh', 'Running')
   const screen = await settledScreen()
   expect(screen.join('\n')).not.toContain('claude')
   await run('pwd')
@@ -179,8 +186,8 @@ async function claudeAgent(dir: string): Promise<string> {
   await newCard('agent', 'Claude Code')
   await expect.poll(logLines).toHaveLength(1)
   const [line] = logLines()
-  expect(line).toMatch(/^--session-id /)
-  return line.slice('--session-id '.length)
+  expect(line.startsWith(`${SETTINGS_ARGS} --session-id `)).toBe(true)
+  return line.slice(`${SETTINGS_ARGS} --session-id `.length)
 }
 
 /** Quits the fake claude with Enter, then exits the shell: the card is Stopped (AC3). */
@@ -188,7 +195,7 @@ async function stopAgent(dir: string): Promise<void> {
   await page.keyboard.press('Enter')
   await run('pwd')
   await expect.poll(bufferLines).toContain(dir)
-  await expect(viewStatus()).toHaveText('Running')
+  await expectStatusOnBoard(page, 'agent', 'Running')
   await run('exit')
   await stoppedToBoard('agent')
 }
@@ -197,31 +204,31 @@ test('AC2: a Claude Code card runs claude with a new session id and shows the Cl
   const u = await claudeAgent(makeDir('alpha'))
   expect(u).toMatch(UUID_V4)
   await expect
-    .poll(async () => (await bufferLines()).some((l) => l.endsWith(`claude --session-id ${u}`)))
+    .poll(async () => (await bufferLines()).some((l) => l.endsWith(claudeFirstLine(u))))
     .toBe(true)
-  await expect.poll(bufferLines).toContain(`fake-claude --session-id ${u}`)
-  expect(logLines().at(-1)).toBe(`--session-id ${u}`)
-  await expect(viewStatus()).toHaveText('Running')
+  await expect.poll(bufferLines).toContain(`fake-claude ${SETTINGS_ARGS} --session-id ${u}`)
+  expect(logLines().at(-1)).toBe(`${SETTINGS_ARGS} --session-id ${u}`)
   await back()
+  await expect(card('agent').getByTestId('card-status-label')).toHaveText('Running')
   await expect(card('agent').getByTestId('card-tag')).toHaveText('Claude')
 })
 
 test('AC3/AC4: claude quits to a shell; exit stops the card; opening it resumes', async () => {
   const dir = makeDir('alpha')
   const u = await claudeAgent(dir)
-  await expect.poll(bufferLines).toContain(`fake-claude --session-id ${u}`)
+  await expect.poll(bufferLines).toContain(`fake-claude ${SETTINGS_ARGS} --session-id ${u}`)
   await stopAgent(dir)
 
   await openCard('agent')
-  const resume = `claude --resume ${u} || claude --session-id ${u}`
-  await expect.poll(bufferLines).toContain(`fake-claude --resume ${u}`)
+  const resume = claudeResumeLine(u)
+  await expect.poll(bufferLines).toContain(`fake-claude ${SETTINGS_ARGS} --resume ${u}`)
   // A new screen: the resume was typed, none of the first run's output is left.
   const lines = await bufferLines()
   expect(lines.some((l) => l.endsWith(resume))).toBe(true)
-  expect(lines).not.toContain(`fake-claude --session-id ${u}`)
+  expect(lines).not.toContain(`fake-claude ${SETTINGS_ARGS} --session-id ${u}`)
   expect(lines).not.toContain(dir)
-  expect(logLines().at(-1)).toBe(`--resume ${u}`)
-  await expect(viewStatus()).toHaveText('Running')
+  expect(logLines().at(-1)).toBe(`${SETTINGS_ARGS} --resume ${u}`)
+  await expectStatusOnBoard(page, 'agent', 'Running')
   // It ran in the card's directory: quit claude and ask the shell.
   await page.keyboard.press('Enter')
   await run('pwd')
@@ -231,18 +238,106 @@ test('AC3/AC4: claude quits to a shell; exit stops the card; opening it resumes'
 test('AC5: with nothing to resume, claude starts fresh with the same session id', async () => {
   const dir = makeDir('alpha')
   const u = await claudeAgent(dir)
-  await expect.poll(bufferLines).toContain(`fake-claude --session-id ${u}`)
+  await expect.poll(bufferLines).toContain(`fake-claude ${SETTINGS_ARGS} --session-id ${u}`)
   await stopAgent(dir)
   appendFileSync(join(home, '.bash_profile'), 'export FAKE_CLAUDE_RESUME_FAILS=1\n')
 
   await openCard('agent')
-  await expect.poll(() => logLines().slice(-2)).toEqual([`--resume ${u}`, `--session-id ${u}`])
-  await expect.poll(bufferLines).toContain(`fake-claude --session-id ${u}`)
+  await expect
+    .poll(() => logLines().slice(-2))
+    .toEqual([`${SETTINGS_ARGS} --resume ${u}`, `${SETTINGS_ARGS} --session-id ${u}`])
+  await expect.poll(bufferLines).toContain(`fake-claude ${SETTINGS_ARGS} --session-id ${u}`)
   // Still running: nothing after its output, no prompt yet.
   await page.waitForTimeout(500)
   const lines = (await bufferLines()).filter((l) => l !== '')
-  expect(lines.at(-1)).toBe(`fake-claude --session-id ${u}`)
-  await expect(viewStatus()).toHaveText('Running')
+  expect(lines.at(-1)).toBe(`fake-claude ${SETTINGS_ARGS} --session-id ${u}`)
+  await back()
+  await expect(card('agent').getByTestId('card-status-label')).toHaveText('Running')
+})
+
+type HookSettings = { hooks: Record<string, { matcher?: string; hooks: { command: string }[] }[]> }
+
+/** The settings file a local card's `claude` got (#31 D14), parsed. */
+function claudeSettingsFile(): HookSettings {
+  return JSON.parse(readFileSync(LOCAL_CLAUDE_SETTINGS, 'utf8')) as HookSettings
+}
+
+test('#31 AC12: claude gets the settings file with the hooks, first start and resume', async () => {
+  const dir = makeDir('alpha')
+  const u = await claudeAgent(dir)
+  expect(logLines()).toEqual([`--settings ${LOCAL_CLAUDE_SETTINGS} --session-id ${u}`])
+  expect(Object.keys(claudeSettingsFile().hooks).sort()).toEqual(
+    ['Notification', 'PreToolUse', 'SessionStart', 'Stop', 'UserPromptSubmit'].sort()
+  )
+  await stopAgent(dir)
+  await openCard('agent')
+  await expect.poll(logLines).toHaveLength(2)
+  expect(logLines().at(-1)).toBe(`--settings ${LOCAL_CLAUDE_SETTINGS} --resume ${u}`)
+})
+
+test("#31 AC13: each hook command sets the card's pill, exits 0, also with Drovr unreachable", async () => {
+  const dir = makeDir('alpha')
+  await claudeAgent(dir)
+  // Quit the fake claude: its shell runs the hooks as Claude Code would, with its environment.
+  await page.keyboard.press('Enter')
+  await run('pwd')
+  await expect.poll(bufferLines).toContain(dir)
+
+  const hooks = claudeSettingsFile().hooks
+  const base = { session_id: 's', transcript_path: '/t', cwd: dir }
+  const tool = (name: string): object => ({
+    ...base,
+    hook_event_name: 'PreToolUse',
+    tool_name: name,
+    tool_input: name === 'Bash' ? { command: 'ls' } : { questions: [{ question: 'Which?' }] }
+  })
+  const steps: [string, object, string | null][] = [
+    ['UserPromptSubmit', { ...base, hook_event_name: 'UserPromptSubmit', prompt: 'hi' }, 'Working'],
+    ['Stop', { ...base, hook_event_name: 'Stop', stop_hook_active: false }, 'Waiting for you'],
+    ['PreToolUse', tool('Bash'), 'Working'],
+    ['PreToolUse', tool('AskUserQuestion'), 'Needs your answer'],
+    ['Stop', { ...base, hook_event_name: 'Stop', stop_hook_active: false }, 'Waiting for you'],
+    [
+      'Notification',
+      {
+        ...base,
+        hook_event_name: 'Notification',
+        notification_type: 'permission_prompt',
+        message: 'Claude needs your permission to use Bash'
+      },
+      'Needs your answer'
+    ],
+    ['SessionStart', { ...base, hook_event_name: 'SessionStart', source: 'startup' }, null]
+  ]
+  steps.forEach(([event, input], i) => {
+    writeFileSync(join(root, `hook-${i}.sh`), hooks[event][0].hooks[0].command)
+    writeFileSync(join(root, `input-${i}.json`), JSON.stringify(input))
+  })
+  const hook = (i: number, prefix = ''): string =>
+    `${prefix}sh ${join(root, `hook-${i}.sh`)} < ${join(root, `input-${i}.json`)}`
+  const pill = async (text: string): Promise<void> =>
+    checkOnBoard(page, 'agent', (agent) =>
+      expect(agent.getByTestId('card-activity')).toHaveText(text)
+    )
+
+  for (const [i, [, , text]] of steps.entries()) {
+    await run(`${hook(i)}; echo "hook${i}=$?"`)
+    await expect.poll(bufferLines).toContain(`hook${i}=0`)
+    if (text) await pill(text)
+  }
+  // SessionStart printed the instruction (D16), and nothing else printed a thing.
+  const lines = await bufferLines()
+  expect(lines).toContain(CLAUDE_INSTRUCTION)
+  for (let i = 0; i < steps.length - 1; i++) {
+    expect(lines[lines.findIndex((l) => l.endsWith(`echo "hook${i}=$?"`)) + 1]).toBe(`hook${i}=0`)
+  }
+
+  // Drovr unreachable: every command still exits 0, silently, and the pill stays.
+  for (const i of steps.keys()) {
+    await run(`${hook(i, `DROVR_SOCKET=${join(root, 'dead.sock')} `)}; echo "dead${i}=$?"`)
+    await expect.poll(bufferLines).toContain(`dead${i}=0`)
+  }
+  await pill('Needs your answer')
 })
 
 test('AC7: a Custom card runs its command on every start; an empty command is refused', async () => {
@@ -372,7 +467,7 @@ test('AC8: the workspace default presets new cards and never changes existing on
   await run('exit')
   await stoppedToBoard('sh')
   await openCard('sh')
-  await expect(viewStatus()).toHaveText('Running')
+  await expectStatusOnBoard(page, 'sh', 'Running')
   const screen = await settledScreen()
   expect(screen).toHaveLength(fresh.length)
   expect(screen.join('\n')).not.toContain('claude')
@@ -454,13 +549,15 @@ test("AC9: changing a card's command applies at its next start, keeping its sess
 
   await openCard('sh')
   await expect.poll(logLines).toHaveLength(1)
-  const u = logLines()[0].slice('--session-id '.length)
+  const u = logLines()[0].slice(`${SETTINGS_ARGS} --session-id `.length)
   expect(u).toMatch(UUID_V4)
   // The fake claude's own row: a redraw of the typed row can leave characters after it, never
   // before (#23 D1).
   await expect
     .poll(async () =>
-      (await bufferLines()).some((l) => l.startsWith(`fake-claude --session-id ${u}`))
+      (await bufferLines()).some((l) =>
+        l.startsWith(`fake-claude ${SETTINGS_ARGS} --session-id ${u}`)
+      )
     )
     .toBe(true)
   await page.keyboard.press('Enter')
@@ -476,8 +573,11 @@ test("AC9: changing a card's command applies at its next start, keeping its sess
   await run('exit')
   await stoppedToBoard('sh')
   await setStartup('sh', 'Claude Code', { current: 'Shell' })
-  await restartAndStop(dir, `claude --resume ${u} || claude --session-id ${u}`)
-  expect(logLines()).toEqual([`--session-id ${u}`, `--resume ${u}`])
+  await restartAndStop(dir, claudeResumeLine(u))
+  expect(logLines()).toEqual([
+    `${SETTINGS_ARGS} --session-id ${u}`,
+    `${SETTINGS_ARGS} --resume ${u}`
+  ])
 })
 
 test('AC9/D2: a Custom command set from the menu is required and shown in the tag', async () => {

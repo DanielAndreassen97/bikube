@@ -3,7 +3,7 @@ import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { runningCount } from '../../core/card-deletes'
-import { isBackShortcut, isSettingsShortcut, splitShortcut } from '../../core/card-shortcuts'
+import { keymapAction, workspaceShortcut } from '../../core/keymap'
 import { CardPanes } from '../../core/card-panes'
 import { CardSessions, type CardScreen } from '../../core/card-sessions'
 import { SessionRouter } from '../../core/session-router'
@@ -18,7 +18,7 @@ import { clipboardShortcut, copySelection, pasteFromClipboard } from '../../core
 import { terminalAppearance, type TerminalAppearance } from '../../core/terminal-appearance'
 import { isSoftwareRenderer } from '../../core/webgl-support'
 import { ghosttyStore } from './ghostty'
-import { settingsStore } from './settings'
+import { currentKeymap, settingsStore } from './settings'
 import '@xterm/xterm/css/xterm.css'
 
 let webglWorthIt: boolean | undefined
@@ -99,12 +99,10 @@ export class XtermScreen implements CardScreen {
     this.term.loadAddon(this.fit)
     const clipboard = window.drovr.clipboard
     this.term.attachCustomKeyEventHandler((event) => {
-      // Back to the board is handled by the view; the shell never sees it (D8).
-      if (isBackShortcut(event, window.drovr.platform)) return false
-      // So is opening Settings, handled by the app (#10 D5).
-      if (isSettingsShortcut(event, window.drovr.platform)) return false
-      // And splitting the focused pane, handled by the view (#11 D4).
-      if (splitShortcut(event, window.drovr.platform)) return false
+      // The configurable shortcuts (#31 D5) are handled by the view and the app; the shell never
+      // sees any part of them (D7), nor of Mod+1…9 (D18).
+      if (keymapAction(event, currentKeymap())) return false
+      if (workspaceShortcut(event, window.drovr.platform) !== null) return false
       const action = clipboardShortcut(event, window.drovr.platform)
       if (!action) return true
       // Stop the native paste event too, or xterm would paste twice.

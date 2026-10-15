@@ -1,3 +1,5 @@
+import type { Activity } from './activity'
+
 /**
  * Card status rules (#4 D9). Plain TS: the renderer feeds it the terminal's screen lines and
  * cursor row, and the process state it tracks per card.
@@ -48,20 +50,31 @@ export function statusLabel(state: CardRunState): string {
   }
 }
 
+/** What a card shows below its title (#31 D11); only a running card has text after the label. */
 export interface CardStatus {
   /** See `statusLabel`. */
   label: string
-  /**
-   * The text after the label: the card's agent status while set (#9 D8), else its last output
-   * line (see `lastOutputLine`); only a running card has one.
-   */
+  /** The cleaned text `board status` set while running (#9 D8); empty when none. */
+  agentStatus: string
+  /** The last output line (see `lastOutputLine`) while running; empty otherwise. */
   lastLine: string
+  /** What `board activity` set while running (#31 D12, D13); absent when none. */
+  activity?: Activity
 }
 
-/** `agentStatus` is the cleaned text `board status` set; empty when none is set (#9 D8). */
-export function cardStatus(state: CardRunState, lastLine: string, agentStatus = ''): CardStatus {
-  if (state.kind !== 'running') return { label: statusLabel(state), lastLine: '' }
-  return { label: statusLabel(state), lastLine: agentStatus || lastLine }
+/**
+ * `agentStatus` is the cleaned text `board status` set; empty when none is set (#9 D8).
+ * `activity` is what `board activity` set (#31 D12); null or omitted when none.
+ */
+export function cardStatus(
+  state: CardRunState,
+  lastLine: string,
+  agentStatus = '',
+  activity: Activity | null = null
+): CardStatus {
+  const label = statusLabel(state)
+  if (state.kind !== 'running') return { label, agentStatus: '', lastLine: '' }
+  return activity ? { label, agentStatus, lastLine, activity } : { label, agentStatus, lastLine }
 }
 
 const NOT_STARTED: CardRunState = { kind: 'stopped' }

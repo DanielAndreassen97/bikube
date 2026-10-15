@@ -2,8 +2,11 @@
  * App-wide settings (#10 D1) and their file format (D6, D7). Plain TS with no Electron or Node
  * imports, so main and the renderer can both use it. The file holds
  * `{ "version": 1, "settings": { "theme", "fontSize", "fontFamily", "shell", "terminalThemeDark",
- * "terminalThemeLight", "useGhosttyTheme", "syncFolder"? } }`; a file from before the last four
- * gets their defaults.
+ * "terminalThemeLight", "useGhosttyTheme", "shortcuts"?, "syncFolder"? } }`; a file from before
+ * the shell and terminal theme fields gets their defaults.
+ *
+ * `shortcuts` (#31 D9) holds only the shortcuts that differ from this OS's default (absent when
+ * none do), so reading and checking it needs the platform the app runs on.
  *
  * `syncFolder` (#13 D10) is kept per machine in the same file but is not part of `Settings`:
  * `settings:save` never carries or changes it, only the sync channels do. It is written only while
@@ -13,6 +16,7 @@
  * becomes the default (D4), so the file and every reader see the actual family.
  */
 
+import { readShortcuts, validateShortcuts, type ShortcutOverrides } from './keymap'
 import { DROVR_DARK, DROVR_LIGHT, isTerminalThemeName } from './terminal-themes'
 
 export const SETTINGS_FILE_NAME = 'drovr-settings.json'
@@ -34,6 +38,8 @@ export interface Settings {
   terminalThemeLight: string
   /** Use the colours of the user's Ghostty config instead of the two themes above. */
   useGhosttyTheme: boolean
+  /** The shortcuts that differ from this OS's default (#31 D9); absent when none do. */
+  shortcuts?: ShortcutOverrides
 }
 
 export const MIN_FONT_SIZE = 8
@@ -99,9 +105,10 @@ export function normalizeFontFamily(value: unknown): string | null {
 
 /**
  * Checks a `settings:save` payload: every field must be valid (D1), else null and nothing is
- * applied (D6). The result holds only D1's fields, with the family normalized.
+ * applied (D6). The result holds only D1's fields, with the family normalized, and the shortcuts
+ * that differ from `platform`'s default when the whole set is valid (#31 D9).
  */
-export function validateSettings(value: unknown): Settings | null {
+export function validateSettings(value: unknown, platform: string): Settings | null {
   if (!isObject(value)) return null
   const fontFamily = normalizeFontFamily(value.fontFamily)
   if (
@@ -115,22 +122,35 @@ export function validateSettings(value: unknown): Settings | null {
   ) {
     return null
   }
-  return {
-    theme: value.theme,
-    fontSize: value.fontSize,
-    fontFamily,
-    shell: value.shell,
-    terminalThemeDark: value.terminalThemeDark,
-    terminalThemeLight: value.terminalThemeLight,
-    useGhosttyTheme: value.useGhosttyTheme
-  }
+  const shortcuts = validateShortcuts(value.shortcuts, platform)
+  if (shortcuts === null) return null
+  return withShortcuts(
+    {
+      theme: value.theme,
+      fontSize: value.fontSize,
+      fontFamily,
+      shell: value.shell,
+      terminalThemeDark: value.terminalThemeDark,
+      terminalThemeLight: value.terminalThemeLight,
+      useGhosttyTheme: value.useGhosttyTheme
+    },
+    shortcuts
+  )
+}
+
+/** `settings` with `shortcuts`, left out when there are none. */
+function withShortcuts(settings: Settings, shortcuts: ShortcutOverrides): Settings {
+  return Object.keys(shortcuts).length > 0 ? { ...settings, shortcuts } : settings
 }
 
 export interface ParsedSettings {
   settings: Settings
   /** The sync folder (#13 D10), present only when the file holds a valid one; absent means off. */
   syncFolder?: string
-  /** The fields that were invalid or missing and took their default (D7). */
+  /**
+   * The fields that were invalid or missing and took their default (D7); `shortcuts` when any
+   * shortcut did (#31 D9).
+   */
   replaced: (keyof Settings)[]
   /** Why the whole file was ignored, when it was. */
   rejected?: string
@@ -139,9 +159,9 @@ export interface ParsedSettings {
 /**
  * Reads the file's contents (D7): not JSON, not an object or another version gives all
  * defaults; otherwise each field is checked on its own and an invalid or missing one takes its
- * default while the valid ones are kept.
+ * default while the valid ones are kept; so is each shortcut, against `platform`'s defaults (#31 D9).
  */
-export function parseSettingsFile(text: string): ParsedSettings {
+export function parseSettingsFile(text: string, platform: string): ParsedSettings {
   let file: unknown
   try {
     file = JSON.parse(text)
@@ -151,7 +171,7 @@ export function parseSettingsFile(text: string): ParsedSettings {
   if (!isObject(file)) return rejectFile('not an object')
   if (file.version !== SETTINGS_VERSION) return rejectFile('unsupported version')
   const raw = isObject(file.settings) ? file.settings : {}
-  const settings: Settings = { ...DEFAULT_SETTINGS }
+  let settings: Settings = { ...DEFAULT_SETTINGS }
   const replaced: (keyof Settings)[] = []
   if (isTheme(raw.theme)) settings.theme = raw.theme
   else replaced.push('theme')
@@ -161,7 +181,9 @@ export function parseSettingsFile(text: string): ParsedSettings {
   if (family !== null) settings.fontFamily = family
   else replaced.push('fontFamily')
   // Absent in a file from before them: the default, not a replacement.
-  const check = <K extends keyof Settings>(
+  const check = <
+    K extends 'shell' | 'terminalThemeDark' | 'terminalThemeLight' | 'useGhosttyTheme'
+  >(
     key: K,
     valid: (value: unknown) => value is Settings[K]
   ): void => {
@@ -172,16 +194,20 @@ export function parseSettingsFile(text: string): ParsedSettings {
   check('terminalThemeDark', isTerminalThemeName)
   check('terminalThemeLight', isTerminalThemeName)
   check('useGhosttyTheme', (v): v is boolean => typeof v === 'boolean')
+  const { shortcuts, dropped } = readShortcuts(raw.shortcuts, platform)
+  settings = withShortcuts(settings, shortcuts)
+  if (dropped.length > 0) replaced.push('shortcuts')
   if (isSyncFolderPath(raw.syncFolder)) return { settings, replaced, syncFolder: raw.syncFolder }
   return { settings, replaced }
 }
 
 /**
- * The file contents for `settings`, fields in D6's order, then the sync folder (#13 D10) when sync
- * is on.
+ * The file contents for `settings`, fields in D6's order, then the shortcuts that differ from the
+ * default (#31 D9) and the sync folder (#13 D10) when sync is on.
  */
 export function serializeSettings(settings: Settings, syncFolder: string | null = null): string {
-  const { theme, fontSize, fontFamily, shell, terminalThemeDark, terminalThemeLight } = settings
+  const { theme, fontSize, fontFamily, shell, terminalThemeDark, terminalThemeLight, shortcuts } =
+    settings
   return JSON.stringify({
     version: SETTINGS_VERSION,
     settings: {
@@ -192,6 +218,7 @@ export function serializeSettings(settings: Settings, syncFolder: string | null 
       terminalThemeDark,
       terminalThemeLight,
       useGhosttyTheme: settings.useGhosttyTheme,
+      ...(shortcuts !== undefined && Object.keys(shortcuts).length > 0 && { shortcuts }),
       ...(syncFolder !== null && { syncFolder })
     }
   })

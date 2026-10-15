@@ -18,12 +18,12 @@ describe('createSettingsStore (#10 D6)', () => {
       fontFamily: 'Courier New',
       ...NEW_FIELDS
     }
-    expect(createSettingsStore(loaded, vi.fn()).get()).toEqual(loaded)
+    expect(createSettingsStore(loaded, vi.fn(), 'linux').get()).toEqual(loaded)
   })
 
   it('applies a valid change, tells subscribers and sends the whole settings to save', () => {
     const save = vi.fn()
-    const store = createSettingsStore({ ...DEFAULT_SETTINGS }, save)
+    const store = createSettingsStore({ ...DEFAULT_SETTINGS }, save, 'linux')
     const listener = vi.fn()
     store.subscribe(listener)
     expect(store.update({ theme: 'dark', fontFamily: '  Courier New  ' })).toBe(true)
@@ -35,7 +35,7 @@ describe('createSettingsStore (#10 D6)', () => {
 
   it('ignores an invalid change: nothing applied, told or saved', () => {
     const save = vi.fn()
-    const store = createSettingsStore({ ...DEFAULT_SETTINGS }, save)
+    const store = createSettingsStore({ ...DEFAULT_SETTINGS }, save, 'linux')
     const listener = vi.fn()
     store.subscribe(listener)
     const before = store.get()
@@ -47,7 +47,7 @@ describe('createSettingsStore (#10 D6)', () => {
 
   it('changes nothing for an update that leaves the settings as they are: not told, not saved', () => {
     const save = vi.fn()
-    const store = createSettingsStore({ ...DEFAULT_SETTINGS }, save)
+    const store = createSettingsStore({ ...DEFAULT_SETTINGS }, save, 'linux')
     const listener = vi.fn()
     store.subscribe(listener)
     const before = store.get()
@@ -61,10 +61,32 @@ describe('createSettingsStore (#10 D6)', () => {
   })
 
   it('stops telling a listener once it unsubscribes', () => {
-    const store = createSettingsStore({ ...DEFAULT_SETTINGS }, vi.fn())
+    const store = createSettingsStore({ ...DEFAULT_SETTINGS }, vi.fn(), 'linux')
     const listener = vi.fn()
     store.subscribe(listener)()
     store.update({ theme: 'light' })
     expect(listener).not.toHaveBeenCalled()
+  })
+
+  it('changes a shortcut, keeps only those that differ from the default and saves them (#31 D9)', () => {
+    const save = vi.fn()
+    const store = createSettingsStore({ ...DEFAULT_SETTINGS }, save, 'linux')
+    const listener = vi.fn()
+    store.subscribe(listener)
+    expect(store.update({ shortcuts: { splitRight: 'Ctrl+Alt+R', back: 'Ctrl+Shift+B' } })).toBe(
+      true
+    )
+    expect(store.get().shortcuts).toEqual({ splitRight: 'Ctrl+Alt+R' })
+    expect(save).toHaveBeenLastCalledWith({
+      ...DEFAULT_SETTINGS,
+      shortcuts: { splitRight: 'Ctrl+Alt+R' }
+    })
+    expect(store.update({ shortcuts: { splitRight: 'Ctrl+Alt+R' } })).toBe(true)
+    expect(listener).toHaveBeenCalledTimes(1)
+    expect(store.update({ shortcuts: {} })).toBe(true)
+    expect(store.get().shortcuts).toBeUndefined()
+    expect(save).toHaveBeenLastCalledWith(DEFAULT_SETTINGS)
+    expect(store.update({ shortcuts: { splitRight: 'Ctrl+Shift+B' } })).toBe(false)
+    expect(save).toHaveBeenCalledTimes(2)
   })
 })

@@ -2,6 +2,7 @@ import { expect, test, type ElectronApplication, type Locator, type Page } from 
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { backToBoard, expectCardOpen, expectStatusOnBoard } from './card-view'
 import { launchApp, removeDataDirs } from './launch'
 
 // Moving cards with the keyboard, the card menu and drag and drop (#6 D4, D5, D6, D7, D8,
@@ -67,16 +68,16 @@ async function newCard(
   } else {
     await page.getByTestId('new-card-input').press('Enter')
   }
-  await expect(page.getByTestId('card-view-title')).toHaveText(title)
+  await expectCardOpen(page, title)
 }
 
 async function openCard(title: string): Promise<void> {
   await card(title).getByTestId('card-open').click()
-  await expect(page.getByTestId('card-view-title')).toHaveText(title)
+  await expectCardOpen(page, title)
 }
 
 async function back(): Promise<void> {
-  await page.getByTestId('card-back').click()
+  await backToBoard(page)
   await expect(page.getByTestId('board')).toBeVisible()
 }
 
@@ -174,7 +175,7 @@ test('AC7: Alt+arrows move the focused card and keep it focused', async () => {
   await page.keyboard.press('ArrowUp')
   await expect(titles('Running')).toHaveText(['b', 'a'])
   await page.keyboard.press('Enter')
-  await expect(page.getByTestId('card-view-title')).toHaveText('a')
+  await expectCardOpen(page, 'a')
 })
 
 test('AC8: the card menu moves a card to the bottom of another column', async () => {
@@ -278,8 +279,8 @@ test("AC9: Stopped and Couldn't start cards move and keep their status", async (
   rmSync(gone, { recursive: true })
   await newCard('Backlog', 'f')
   const reason = "Couldn't start: working directory not found"
-  await expect(page.getByTestId('card-view').getByTestId('card-status-label')).toHaveText(reason)
   await back()
+  await expect(card('f').getByTestId('card-status-label')).toHaveText(reason)
 
   await menuMove('f', 'Done')
   await card('s').getByTestId('card-open').focus()
@@ -291,7 +292,7 @@ test("AC9: Stopped and Couldn't start cards move and keep their status", async (
 
   // Opening the Stopped card starts it again with its startup command (#5 D7).
   await openCard('s')
-  await expect(page.getByTestId('card-view').getByTestId('card-status-label')).toHaveText('Running')
+  await expectStatusOnBoard(page, 's', 'Running')
   await expect.poll(bufferLines).toContain('started-42')
 })
 
@@ -330,12 +331,15 @@ async function dragOver(title: string, target: Locator, y = 0.5): Promise<void> 
   await page.mouse.move(to.x + to.width / 2, to.y + to.height * y, { steps: 10 })
 }
 
-/** Widens the window so every default column is on screen: a drag doesn't scroll the board. */
+/**
+ * Widens the window so every default column (300 px since #31 D11) is on screen: a drag doesn't
+ * scroll the board.
+ */
 async function showAllColumns(): Promise<void> {
-  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1600, 800))
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1800, 800))
   await expect
     .poll(() => column('Done').evaluate((el) => el.getBoundingClientRect().right))
-    .toBeLessThan(1500)
+    .toBeLessThan(1700)
 }
 
 /** Drags a card onto `target` at `y` (see `dragOver`) and releases it there. */
@@ -413,7 +417,7 @@ test('AC1/AC6: a running card dragged to another column keeps its terminal and s
 
   // AC6: a click on the moved card opens it at full size.
   await card('api').getByTestId('card-title').click()
-  await expect(page.getByTestId('card-view-title')).toHaveText('api')
+  await expectCardOpen(page, 'api')
   expect(await bufferLines()).toContain('drovr-marker')
   await expect.poll(terminalFocused).toBe(true)
   await page.keyboard.press('Control+C')

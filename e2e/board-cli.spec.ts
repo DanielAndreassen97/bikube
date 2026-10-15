@@ -12,6 +12,7 @@ import { createConnection } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BOARD_USAGE } from '../src/core/board-args'
+import { backToBoard, checkOnBoard, expectCardOpen, splitRight } from './card-view'
 import { launchApp, newDataDir, removeDataDirs } from './launch'
 
 // The `board` command (#9): typed into a card's terminal, it reaches the app over
@@ -83,18 +84,18 @@ async function newCard(columnName: string, title: string): Promise<void> {
   await column(columnName).getByTestId('new-card').click()
   await page.getByTestId('new-card-input').fill(title)
   await page.getByTestId('new-card-input').press('Enter')
-  await expect(page.getByTestId('card-view-title')).toHaveText(title)
+  await expectCardOpen(page, title)
   await expect.poll(terminalFocused).toBe(true)
 }
 
 async function openCard(title: string): Promise<void> {
   await card(title).getByTestId('card-open').click()
-  await expect(page.getByTestId('card-view-title')).toHaveText(title)
+  await expectCardOpen(page, title)
   await expect.poll(terminalFocused).toBe(true)
 }
 
 async function back(): Promise<void> {
-  await page.getByTestId('card-back').click()
+  await backToBoard(page)
   await expect(page.getByTestId('board')).toBeVisible()
 }
 
@@ -194,7 +195,7 @@ test('AC1: board move . done moves the calling card to the bottom of Done, and i
 
   expect(await board(alpha, 'board move . done')).toEqual(ok)
   // A card open at full size stays open (#9 D7).
-  await expect(page.getByTestId('card-view-title')).toHaveText('api')
+  await expectCardOpen(page, 'api')
 
   await back()
   await expect(titlesIn('Done')).toHaveText(['shipped', 'api'])
@@ -413,8 +414,23 @@ test('AC10: bad requests get an error and a closed connection; board keeps worki
   await expect(titlesIn('Done')).toHaveText(['api'])
 })
 
-const viewStatus = (): Locator => page.getByTestId('card-view').getByTestId('card-status')
-const viewStatusLine = (): Locator => page.getByTestId('card-view').getByTestId('card-status-line')
+/**
+ * The open card shows no status (#31 D1): reads `api`'s lines on the board (`card-status-label`,
+ * `card-agent-status`, `card-status-line`, #31 D11), each test id with its text, then opens
+ * `api` again.
+ */
+async function expectOnBoard(...lines: [testId: string, text: string][]): Promise<void> {
+  await back()
+  for (const [testId, text] of lines) {
+    await expect(card('api').getByTestId(testId)).toHaveText(text)
+  }
+  await openCard('api')
+}
+
+const runningTests: [string, string][] = [
+  ['card-status-label', 'Running'],
+  ['card-agent-status', 'running tests']
+]
 
 test('AC5: board status shows on the status line, cleaned and cut, until cleared', async () => {
   await launch()
@@ -423,28 +439,90 @@ test('AC5: board status shows on the status line, cleaned and cut, until cleared
   await newCard('Backlog', 'api')
 
   expect(await board(alpha, 'board status . "running tests"')).toEqual(ok)
-  await expect(viewStatus()).toHaveText('Running · running tests')
+  await expectOnBoard(...runningTests)
 
   // More output doesn't replace it.
   await run("printf 'more-output\\n'")
   await expect.poll(async () => (await bufferLines()).includes('more-output')).toBe(true)
   await page.waitForTimeout(600)
-  await expect(viewStatus()).toHaveText('Running · running tests')
   await back()
-  await expect(card('api').getByTestId('card-status')).toHaveText('Running · running tests')
+  await expect(card('api').getByTestId('card-status-label')).toHaveText('Running')
+  await expect(card('api').getByTestId('card-agent-status')).toHaveText('running tests')
 
   await openCard('api')
   expect(await board(alpha, `board status . "$(printf 'a\\033[31mb')"`)).toEqual(ok)
-  await expect(viewStatusLine()).toHaveText('ab')
+  await expectOnBoard(['card-agent-status', 'ab'])
 
   const long = 'abcdefghij'.repeat(30)
   expect(await board(alpha, `board status . ${long}`)).toEqual(ok)
-  await expect(viewStatusLine()).toHaveText(long.slice(0, 200))
+  await expectOnBoard(['card-agent-status', long.slice(0, 200)])
 
   await run(`board status . "" && printf 'drovr-marker'; sleep 30`)
-  await expect(viewStatusLine()).toHaveText('drovr-marker')
   await back()
-  await expect(card('api').getByTestId('card-status')).toHaveText('Running · drovr-marker')
+  await expect(card('api').getByTestId('card-status-line')).toHaveText('drovr-marker')
+  await expect(card('api').getByTestId('card-status-label')).toHaveText('Running')
+  await expect(card('api').getByTestId('card-agent-status')).toHaveCount(0)
+})
+
+test('#31 AC10: the card shows its label, agent status and last output line on separate lines', async () => {
+  await launch()
+  const alpha = makeDir('alpha')
+  await createWorkspace(alpha, 'alpha')
+  await newCard('Backlog', 'api')
+  const label = card('api').getByTestId('card-status-label')
+  const agent = card('api').getByTestId('card-agent-status')
+  const line = card('api').getByTestId('card-status-line')
+  const box = async (
+    l: Locator
+  ): Promise<{ x: number; y: number; width: number; height: number }> => (await l.boundingBox())!
+
+  /** Runs `board status . <status>`, then prints `hello` and waits, so it stays the last line. */
+  const statusThenHello = async (status: string): Promise<void> => {
+    await run(`board status . ${status}; echo hello; sleep 30`)
+    await expect.poll(async () => (await bufferLines()).includes('hello')).toBe(true)
+    await back()
+  }
+
+  await statusThenHello('"running tests"')
+  await expect(label).toHaveText('Running')
+  await expect(agent).toHaveText('running tests')
+  await expect(line).toHaveText('hello')
+  const [l, a, o] = [await box(label), await box(agent), await box(line)]
+  expect(a.y).toBeGreaterThanOrEqual(l.y + l.height - 1)
+  expect(o.y).toBeGreaterThanOrEqual(a.y + a.height - 1)
+  const font = (el: Element): string => getComputedStyle(el).fontFamily
+  expect(await line.evaluate(font)).toMatch(/monospace/)
+  expect(await agent.evaluate(font)).not.toMatch(/monospace/)
+  // The stop button (D10) sits at the right of the status row.
+  const stop = await box(card('api').getByTestId('card-stop'))
+  expect(stop.x).toBeGreaterThan(l.x + l.width)
+  const middle = stop.y + stop.height / 2
+  expect(middle).toBeGreaterThan(l.y)
+  expect(middle).toBeLessThan(l.y + l.height)
+
+  // A long status shows on at most 2 lines, its full text in the tooltip.
+  await openCard('api')
+  await page.keyboard.press('Control+C')
+  const long = 'abcdefghij'.repeat(15)
+  await statusThenHello(`"${long}"`)
+  await expect(agent).toHaveAttribute('title', long)
+  await expect(line).toHaveText('hello')
+  const lineHeight = await agent.evaluate((el) => parseFloat(getComputedStyle(el).lineHeight))
+  const height = (await box(agent)).height
+  expect(height).toBeGreaterThan(lineHeight * 1.5)
+  expect(height).toBeLessThanOrEqual(lineHeight * 2 + 1)
+  expect(await agent.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true)
+
+  // Clearing it leaves the label and the last output line.
+  await openCard('api')
+  await page.keyboard.press('Control+C')
+  await statusThenHello('""')
+  await expect(label).toHaveText('Running')
+  await expect(line).toHaveText('hello')
+  await expect(agent).toHaveCount(0)
+
+  // Columns are 300 px wide (their content box, as the 272 px they replace).
+  expect(await column('Backlog').evaluate((el) => getComputedStyle(el).width)).toBe('300px')
 })
 
 test("AC6: stopping clears the status; a card that isn't running can't get one", async () => {
@@ -458,19 +536,113 @@ test("AC6: stopping clears the status; a card that isn't running can't get one",
 
   await newCard('Backlog', 'api')
   expect(await board(alpha, 'board status . "running tests"')).toEqual(ok)
-  await expect(viewStatus()).toHaveText('Running · running tests')
+  await expectOnBoard(...runningTests)
 
   await run('exit')
   await expect(page.getByTestId('board')).toBeVisible()
   await expect(card('api').getByTestId('card-status')).toHaveText('Stopped')
   await expect(card('api').getByTestId('card-status-line')).toHaveCount(0)
+  await expect(card('api').getByTestId('card-agent-status')).toHaveCount(0)
 
   await openCard('api')
-  await expect(page.getByTestId('card-view').getByTestId('card-status-label')).toHaveText('Running')
+  await expectOnBoard(['card-status-label', 'Running'])
   expect(await board(alpha, 'board status old hi')).toEqual(refused('board: "old" is not running'))
   await run("printf 'drovr-marker'; sleep 30")
-  await expect(viewStatus()).toHaveText('Running · drovr-marker')
   await back()
-  await expect(card('api').getByTestId('card-status')).toHaveText('Running · drovr-marker')
+  await expect(card('api').getByTestId('card-status-label')).toHaveText('Running')
+  await expect(card('api').getByTestId('card-status-line')).toHaveText('drovr-marker')
   await expect(card('old').getByTestId('card-status')).toHaveText('Stopped')
+})
+
+/**
+ * Runs `command` in whichever pane of the open card has keyboard focus (its directory is `dir`):
+ * stdout, stderr and the exit code go to files, so no pane's screen needs reading.
+ */
+async function boardInFocusedPane(
+  dir: string,
+  command: string
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const tag = `p${++commands}`
+  const rc = join(dir, `${tag}.rc`)
+  await run(
+    `${command} >${tag}.out 2>${tag}.err; echo $? >${tag}.rc.tmp; mv ${tag}.rc.tmp ${tag}.rc`
+  )
+  await expect.poll(() => existsSync(rc), { timeout: 15_000 }).toBe(true)
+  return {
+    code: Number(readFileSync(rc, 'utf8').trim()),
+    stdout: readFileSync(join(dir, `${tag}.out`), 'utf8'),
+    stderr: readFileSync(join(dir, `${tag}.err`), 'utf8')
+  }
+}
+
+/** `api`'s activity pill on the board reads `text`, or is absent for null (#31 D13). */
+async function expectPill(text: string | null): Promise<void> {
+  await checkOnBoard(page, 'api', async (api) => {
+    await expect(api.getByTestId('card-status-label')).toHaveText('Running')
+    if (text === null) await expect(api.getByTestId('card-activity')).toHaveCount(0)
+    else await expect(api.getByTestId('card-activity')).toHaveText(text)
+  })
+}
+
+test('#31 AC11: board activity shows a pill until none, from the main and an extra pane, cleared on exit', async () => {
+  await launch()
+  const alpha = makeDir('alpha')
+  await createWorkspace(alpha, 'alpha')
+  await newCard('Backlog', 'api')
+
+  expect(await board(alpha, 'board activity . working')).toEqual(ok)
+  await expectPill('Working')
+  expect(await board(alpha, 'board activity . waiting')).toEqual(ok)
+  await expectPill('Waiting for you')
+  expect(await board(alpha, 'board activity . question')).toEqual(ok)
+  await expectPill('Needs your answer')
+  expect(await board(alpha, 'board activity . none')).toEqual(ok)
+  await expectPill(null)
+  expect(await board(alpha, 'board activity . busy')).toEqual({
+    code: 2,
+    stdout: '',
+    stderr: BOARD_USAGE
+  })
+  await expectPill(null)
+
+  // From an extra pane (#11): the same card.
+  await splitRight(page)
+  const panes = page.getByTestId('card-view').getByTestId('pane')
+  await expect(panes).toHaveCount(2)
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const pane = document.activeElement?.closest('[data-testid=card-view] [data-testid=pane]')
+        return [...document.querySelectorAll('[data-testid=card-view] [data-testid=pane]')].indexOf(
+          pane as Element
+        )
+      })
+    )
+    .toBe(1)
+  expect(await boardInFocusedPane(alpha, 'board activity . question')).toEqual(ok)
+  await expectPill('Needs your answer')
+  expect(await boardInFocusedPane(alpha, 'board activity . busy')).toEqual({
+    code: 2,
+    stdout: '',
+    stderr: BOARD_USAGE
+  })
+  expect(await boardInFocusedPane(alpha, 'board activity . working')).toEqual(ok)
+  await expectPill('Working')
+
+  // `exit` in the main pane: Stopped, no pill; reopening starts it again with none.
+  await panes.nth(0).getByTestId('terminal').click()
+  await expect.poll(terminalFocused).toBe(true)
+  await run('exit')
+  await expect(page.getByTestId('board')).toBeVisible()
+  await expect(card('api').getByTestId('card-status')).toHaveText('Stopped')
+  await expect(card('api').getByTestId('card-activity')).toHaveCount(0)
+
+  await openCard('api')
+  await back()
+  await expect(card('api').getByTestId('card-status-label')).toHaveText('Running')
+  await expect(card('api').getByTestId('card-activity')).toHaveCount(0)
+  await openCard('api')
+  expect(await board(alpha, 'board activity old working')).toEqual(
+    refused('board: no card "old" in this workspace')
+  )
 })

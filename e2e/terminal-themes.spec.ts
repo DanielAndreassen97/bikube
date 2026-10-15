@@ -2,6 +2,7 @@ import { expect, test, type ElectronApplication, type Locator, type Page } from 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { backToBoard, expectCardOpen, expectStatusOnBoard } from './card-view'
 import { launchApp, removeDataDirs } from './launch'
 
 // The Shell setting, the terminal theme pickers and "Use Ghostty theme". Each test launches with
@@ -33,7 +34,7 @@ async function newCard(page: Page, title: string): Promise<void> {
   await page.getByTestId('column').first().getByTestId('new-card').click()
   await page.getByTestId('new-card-input').fill(title)
   await page.getByTestId('new-card-input').press('Enter')
-  await expect(page.getByTestId('card-view-title')).toHaveText(title)
+  await expectCardOpen(page, title)
 }
 
 /** The open card's terminal: its xterm background and red, and its buffer as trimmed lines. */
@@ -199,9 +200,7 @@ test('the Shell setting: a listed shell starts new cards with $SHELL set; a miss
   await expect(dialog(page).getByTestId('settings-error-shell')).toHaveCount(0)
   await expect.poll(() => savedSettings(dataDir).shell).toBe('/nonexistent/fish')
   await page.keyboard.press('Escape')
-  await page.getByTestId('card-back').click()
+  await backToBoard(page)
   await newCard(page, 'missing')
-  await expect(page.getByTestId('card-view').getByTestId('card-status-label')).toHaveText(
-    "Couldn't start: shell not found: /nonexistent/fish"
-  )
+  await expectStatusOnBoard(page, 'missing', "Couldn't start: shell not found: /nonexistent/fish")
 })
