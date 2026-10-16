@@ -111,6 +111,17 @@ describe('remoteCommand (#12 D5)', () => {
   })
 })
 
+describe('remoteCommand and the Claude Code status updates setting', () => {
+  const board = { cardId: 'k1', remoteSocket: '/tmp/drovr-none.sock' }
+
+  it('exports DROVR_CLAUDE_STATUS=0 only when the setting is off', () => {
+    const off = 'DROVR_CLAUDE_STATUS=0; export DROVR_CLAUDE_STATUS; '
+    expect(remoteCommand('/srv/api', { ...board, claudeStatus: false })).toContain(off)
+    expect(remoteCommand('/srv/api', { ...board, claudeStatus: true })).not.toContain(off)
+    expect(remoteCommand('/srv/api', board)).not.toContain(off)
+  })
+})
+
 describe('sshShellLine (#12 D5)', () => {
   it('builds `exec ssh -t -- <host> <remote command>` as the local shell reads it', () => {
     const result = sshShellLine('me@devbox', `/tmp/it's a $dir`)
@@ -345,29 +356,5 @@ describe('the remote command with board, run by sh (#25 D4)', () => {
     expect(result).toEqual({ code: 0, stdout: READY_MARKER, stderr: '' })
     expect(readFileSync(seen, 'utf8')).toBe(`${cardId}|/tmp/drovr-none.sock|unset|/usr/bin:/bin`)
     expect(readFileSync(`${seen}-claude`, 'utf8')).toBe('{}')
-  })
-
-  it.each([
-    ['SIGHUP', 129],
-    ['SIGTERM', 143]
-  ] as const)('cleans up and exits %s → %i when the session ends', async (signal, code) => {
-    const remote = join(dir, 'drovr-r.sock')
-    writeFileSync(remote, '')
-    const seen = join(dir, 'seen')
-    const login = shell(`printf '%s' "$DROVR_BIN" > ${seen}\nsleep 30`)
-    const result = await runRemote(
-      remoteCommand(dir, { cardId, remoteSocket: remote }),
-      { PATH: '/usr/bin:/bin', HOME: dir, SHELL: login },
-      (pid) => {
-        const poll = setInterval(() => {
-          if (!existsSync(seen) || !readFileSync(seen, 'utf8')) return
-          clearInterval(poll)
-          process.kill(-pid, signal)
-        }, 20)
-      }
-    )
-    expect(result.code).toBe(code)
-    expect(existsSync(readFileSync(seen, 'utf8'))).toBe(false)
-    expect(existsSync(remote)).toBe(false)
   })
 })

@@ -1,4 +1,20 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import {
+  Bot,
+  ChevronRight,
+  FolderSync,
+  Keyboard,
+  Minus,
+  Monitor,
+  Moon,
+  Palette,
+  Plus,
+  RotateCw,
+  SquareTerminal,
+  Sun,
+  Terminal as TerminalIcon,
+  type LucideIcon
+} from 'lucide-react'
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
 import {
   SHORTCUT_ACTIONS,
   SHORTCUT_LABELS,
@@ -13,55 +29,72 @@ import {
 import {
   DEFAULT_FONT_FAMILY,
   MAX_FONT_FAMILY_LENGTH,
+  MAX_FONT_SIZE,
+  MAX_LETTER_SPACING,
+  MIN_FONT_SIZE,
+  SCROLLBACK_CHOICES,
   THEMES,
   isShellSetting,
+  resolveTheme,
+  type Bell,
+  type CursorStyle,
   type ResolvedTheme,
   type Theme
 } from '../../core/settings'
-import { ANSI_COLOUR_NAMES, withSymbols } from '../../core/terminal-appearance'
+import { ANSI_COLOUR_NAMES, terminalPalette, withSymbols } from '../../core/terminal-appearance'
 import { terminalTheme } from '../../core/terminal-themes'
 import type { ShellChoices } from '../../shared/api'
+import { FONT_CHOICES, familyOf, fontChoiceOf } from '../../core/font-choices'
 import { FONT_SIZE_ERROR, fontFamilyField, parseFontSize } from '../../core/settings-form'
 import { syncFolderOf, syncStatusText } from '../../core/sync-status'
 import { ghosttyStore, useGhosttyTheme } from './ghostty'
+import { installedFonts } from './installed-fonts'
+import { ICON, SMALL_ICON } from './icons'
 import Modal from './Modal'
 import { settingsStore, useSettings } from './settings'
+import TerminalPreview from './TerminalPreview'
 import ThemePicker from './ThemePicker'
 import { useSyncStatus } from './sync'
 
 export const SYNC_FOLDER_ERROR = 'Folder not found'
 
 const THEME_LABELS: Record<Theme, string> = { system: 'System', dark: 'Dark', light: 'Light' }
+const THEME_ICONS: Record<Theme, LucideIcon> = { system: Monitor, dark: Moon, light: Sun }
+const CUSTOM_FONT = '__custom__'
+/** The font the default family (Menlo, Consolas, monospace) gives on this OS. */
+const DEFAULT_FONT_LABEL =
+  {
+    darwin: 'Default (Menlo)',
+    win32: 'Default (Consolas)'
+  }[window.drovr?.platform as string] ?? 'Default (monospace)'
 
 export const SHELL_NOT_ABSOLUTE = 'Enter an absolute path, e.g. /opt/homebrew/bin/fish'
 
+type Section = 'appearance' | 'terminal' | 'shell' | 'agents' | 'shortcuts' | 'sync'
+
+const SECTIONS: { key: Section; label: string; icon: LucideIcon }[] = [
+  { key: 'appearance', label: 'Appearance', icon: Palette },
+  { key: 'terminal', label: 'Terminal', icon: SquareTerminal },
+  { key: 'shell', label: 'Shell', icon: TerminalIcon },
+  { key: 'agents', label: 'Agents', icon: Bot },
+  { key: 'shortcuts', label: 'Shortcuts', icon: Keyboard },
+  { key: 'sync', label: 'Sync', icon: FolderSync }
+]
+
 /**
- * The Settings dialog (#10 D5): Theme, Font size, Font family, Shell, Terminal colours, Sync
- * folder (#13 D10) and Shortcuts (#31 D8). Every valid change applies and saves at once; closing
- * applies a typed family, keeps what was applied and drops an invalid font size. Picking a terminal
- * theme swaps the dialog's content for the theme picker until a theme is picked or cancelled.
+ * The Settings dialog (#10 D5): a list of sections (Appearance, Terminal, Shell, Shortcuts, Sync)
+ * beside the chosen one, which scrolls on its own while the title and Done stay put. It opens on
+ * Appearance. Every valid change applies and saves at once; closing applies a typed family, keeps
+ * what was applied and drops an invalid font size. Picking a terminal theme swaps the dialog's
+ * content for the theme picker until a theme is picked or cancelled, then returns to Terminal.
  */
 function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.Element {
   const settings = useSettings()
   const id = useId()
-  const [sizeText, setSizeText] = useState(() => String(settingsStore.get().fontSize))
-  const [sizeInvalid, setSizeInvalid] = useState(false)
+  const [section, setSection] = useState<Section>('appearance')
   const [family, setFamily] = useState(() => fontFamilyField(settingsStore.get().fontFamily))
   const [picking, setPicking] = useState<ResolvedTheme | null>(null)
-
-  const changeSize = (text: string): void => {
-    setSizeText(text)
-    const size = parseFontSize(text)
-    setSizeInvalid(size === null)
-    if (size !== null) settingsStore.update({ fontSize: size })
-  }
-
-  // The family applies as typed, trimmed (empty means the default), on blur or Enter.
-  const applyFamily = (): void => {
-    if (settingsStore.update({ fontFamily: family })) {
-      setFamily(fontFamilyField(settingsStore.get().fontFamily))
-    }
-  }
+  const tabs = useRef<HTMLDivElement>(null)
 
   // Closing any way (Done, Escape, a click outside) applies a family typed but not yet applied.
   const close = (): void => {
@@ -69,11 +102,17 @@ function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.Element
     onClose()
   }
 
-  const sizeId = `${id}-size`
-  const syncId = `${id}-sync`
-  const syncErrorId = `${id}-sync-error`
-  const sizeErrorId = `${id}-size-error`
-  const familyId = `${id}-family`
+  // Up and Down move between sections, as in a vertical tab list.
+  const onTabKey = (e: React.KeyboardEvent): void => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+    e.preventDefault()
+    const at = SECTIONS.findIndex((s) => s.key === section)
+    const next =
+      SECTIONS[(at + (e.key === 'ArrowDown' ? 1 : SECTIONS.length - 1)) % SECTIONS.length]!
+    setSection(next.key)
+    tabs.current?.querySelector<HTMLElement>(`[data-section="${next.key}"]`)?.focus()
+  }
+
   if (picking !== null) {
     const key = picking === 'dark' ? 'terminalThemeDark' : 'terminalThemeLight'
     return (
@@ -100,78 +139,65 @@ function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.Element
       </Modal>
     )
   }
+  const panelId = `${id}-panel`
+  const current = SECTIONS.find((s) => s.key === section)!
   return (
     <Modal
       key="settings"
       title="Settings"
       onClose={close}
       testId="settings-dialog"
-      initialFocus='input[type="radio"]:checked'
+      className="modal-settings"
+      initialFocus={section === 'appearance' ? 'input[type="radio"]:checked' : undefined}
       closeOnOutsideClick
     >
-      <fieldset className="field radio-group">
-        <legend>Theme</legend>
-        {THEMES.map((theme) => (
-          <label key={theme} className="radio">
-            <input
-              type="radio"
-              name={`${id}-theme`}
-              value={theme}
-              data-testid={`settings-theme-${theme}`}
-              checked={settings.theme === theme}
-              onChange={() => settingsStore.update({ theme })}
-            />
-            {THEME_LABELS[theme]}
-          </label>
-        ))}
-      </fieldset>
-      <div className="field">
-        <label htmlFor={sizeId}>Font size</label>
-        <input
-          id={sizeId}
-          data-testid="settings-font-size"
-          inputMode="numeric"
-          value={sizeText}
-          autoComplete="off"
-          aria-invalid={sizeInvalid ? true : undefined}
-          aria-describedby={sizeInvalid ? sizeErrorId : undefined}
-          onChange={(e) => changeSize(e.target.value)}
-        />
-        {sizeInvalid && (
-          <p
-            className="field-error"
-            id={sizeErrorId}
-            role="alert"
-            data-testid="settings-error-font-size"
-          >
-            {FONT_SIZE_ERROR}
-          </p>
-        )}
+      <div className="settings">
+        <div
+          ref={tabs}
+          className="settings-nav"
+          role="tablist"
+          aria-label="Settings sections"
+          aria-orientation="vertical"
+          onKeyDown={onTabKey}
+        >
+          {SECTIONS.map(({ key, label, icon: Icon }) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              id={`${id}-tab-${key}`}
+              className="settings-tab"
+              data-section={key}
+              data-testid={`settings-section-${key}`}
+              aria-selected={section === key}
+              aria-controls={panelId}
+              tabIndex={section === key ? 0 : -1}
+              onClick={() => setSection(key)}
+            >
+              <Icon {...ICON} />
+              {label}
+            </button>
+          ))}
+        </div>
+        <div
+          className="settings-panel"
+          id={panelId}
+          role="tabpanel"
+          aria-labelledby={`${id}-tab-${section}`}
+          data-testid={`settings-panel-${section}`}
+        >
+          <h3 className="settings-panel-title">{current.label}</h3>
+          {section === 'appearance' && <AppearanceSection family={family} setFamily={setFamily} />}
+          {section === 'terminal' && <TerminalColoursField onPick={setPicking} />}
+          {section === 'shell' && <ShellField />}
+          {section === 'agents' && <AgentsSection />}
+          {section === 'shortcuts' && (
+            <ShortcutsSection keymap={resolveKeymap(settings.shortcuts, window.drovr.platform)} />
+          )}
+          {section === 'sync' && <SyncFolderField id={`${id}-sync`} errorId={`${id}-sync-error`} />}
+        </div>
       </div>
-      <div className="field">
-        <label htmlFor={familyId}>Font family</label>
-        <input
-          id={familyId}
-          data-testid="settings-font-family"
-          value={family}
-          maxLength={MAX_FONT_FAMILY_LENGTH}
-          placeholder={DEFAULT_FONT_FAMILY}
-          spellCheck={false}
-          autoComplete="off"
-          onChange={(e) => setFamily(e.target.value)}
-          onBlur={applyFamily}
-          onKeyDown={(e) => {
-            if (e.key !== 'Enter') return
-            e.preventDefault()
-            applyFamily()
-          }}
-        />
-      </div>
-      <ShellField />
-      <TerminalColoursField onPick={setPicking} />
-      <SyncFolderField id={syncId} errorId={syncErrorId} />
-      <ShortcutsSection keymap={resolveKeymap(settings.shortcuts, window.drovr.platform)} />
-      <div className="modal-actions">
+      <div className="modal-actions settings-footer">
         <button
           type="button"
           className="btn btn-primary"
@@ -185,11 +211,433 @@ function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.Element
   )
 }
 
+/**
+ * Appearance: the app theme, and the terminals' font size (typed, or stepped with the buttons and
+ * the arrow keys) and family (applied on blur or Enter, empty means the default). The family's
+ * draft lives in the dialog, so closing from another section still applies it.
+ */
+function AppearanceSection({
+  family,
+  setFamily
+}: {
+  family: string
+  setFamily: (family: string) => void
+}): React.JSX.Element {
+  const settings = useSettings()
+  const id = useId()
+  const [sizeText, setSizeText] = useState(() => String(settingsStore.get().fontSize))
+  const [sizeInvalid, setSizeInvalid] = useState(false)
+
+  const changeSize = (text: string): void => {
+    setSizeText(text)
+    const size = parseFontSize(text)
+    setSizeInvalid(size === null)
+    if (size !== null) settingsStore.update({ fontSize: size })
+  }
+  const step = (by: number): void => {
+    const size = Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, settings.fontSize + by))
+    changeSize(String(size))
+  }
+  const applyFamily = (): void => {
+    if (settingsStore.update({ fontFamily: family })) {
+      setFamily(fontFamilyField(settingsStore.get().fontFamily))
+    }
+  }
+
+  // The list: installed fonts, plus the saved one when it isn't installed here (e.g. synced).
+  const installed = installedFonts()
+  const choice = fontChoiceOf(settings.fontFamily)
+  // Shown for a custom family, and kept while editing even when it becomes the default.
+  const [showCustom, setShowCustom] = useState(() => choice.kind === 'custom')
+  const fonts = FONT_CHOICES.filter(
+    (name) => installed.has(name) || (choice.kind === 'font' && choice.name === name)
+  )
+  const fontValue = showCustom ? CUSTOM_FONT : choice.kind === 'font' ? choice.name : ''
+  // Picking a font applies it at once; the custom draft follows, so closing doesn't undo it.
+  const pickFont = (value: string): void => {
+    if (value === CUSTOM_FONT) {
+      setShowCustom(true)
+      return
+    }
+    setShowCustom(false)
+    const next = value === '' ? DEFAULT_FONT_FAMILY : familyOf(value)
+    settingsStore.update({ fontFamily: next })
+    setFamily(fontFamilyField(next))
+  }
+
+  const sizeId = `${id}-size`
+  const sizeErrorId = `${id}-size-error`
+  const familyId = `${id}-family`
+  return (
+    <>
+      <fieldset className="settings-row">
+        <legend className="settings-label">Theme</legend>
+        <div className="segmented">
+          {THEMES.map((theme) => {
+            const Icon = THEME_ICONS[theme]
+            return (
+              <label key={theme} className="radio">
+                <input
+                  type="radio"
+                  name={`${id}-theme`}
+                  value={theme}
+                  data-testid={`settings-theme-${theme}`}
+                  checked={settings.theme === theme}
+                  onChange={() => settingsStore.update({ theme })}
+                />
+                <Icon {...SMALL_ICON} />
+                {THEME_LABELS[theme]}
+              </label>
+            )
+          })}
+        </div>
+      </fieldset>
+      <div className="settings-row">
+        <label className="settings-label" htmlFor={sizeId}>
+          Font size
+        </label>
+        <div className="settings-control">
+          <div className="stepper">
+            <button
+              type="button"
+              className="stepper-btn"
+              aria-label="Smaller font"
+              disabled={settings.fontSize <= MIN_FONT_SIZE}
+              onClick={() => step(-1)}
+            >
+              <Minus {...SMALL_ICON} />
+            </button>
+            <input
+              id={sizeId}
+              className="stepper-input"
+              data-testid="settings-font-size"
+              inputMode="numeric"
+              value={sizeText}
+              autoComplete="off"
+              aria-invalid={sizeInvalid ? true : undefined}
+              aria-describedby={sizeInvalid ? sizeErrorId : undefined}
+              onChange={(e) => changeSize(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
+                e.preventDefault()
+                step(e.key === 'ArrowUp' ? 1 : -1)
+              }}
+            />
+            <button
+              type="button"
+              className="stepper-btn"
+              aria-label="Larger font"
+              disabled={settings.fontSize >= MAX_FONT_SIZE}
+              onClick={() => step(1)}
+            >
+              <Plus {...SMALL_ICON} />
+            </button>
+          </div>
+          {sizeInvalid && (
+            <p
+              className="field-error"
+              id={sizeErrorId}
+              role="alert"
+              data-testid="settings-error-font-size"
+            >
+              {FONT_SIZE_ERROR}
+            </p>
+          )}
+        </div>
+      </div>
+      <div className="settings-row">
+        <label className="settings-label" htmlFor={familyId}>
+          Font family
+        </label>
+        <div className="settings-control">
+          <select
+            id={familyId}
+            className="settings-input"
+            data-testid="settings-font-choice"
+            value={fontValue}
+            onChange={(e) => pickFont(e.target.value)}
+          >
+            <option value="">{DEFAULT_FONT_LABEL}</option>
+            {fonts.map((name) => (
+              <option key={name} value={name} style={{ fontFamily: familyOf(name) }}>
+                {installed.has(name) ? name : `${name} (not installed)`}
+              </option>
+            ))}
+            <option value={CUSTOM_FONT}>Custom…</option>
+          </select>
+          {showCustom && (
+            <input
+              className="settings-input"
+              data-testid="settings-font-family"
+              aria-label="Custom font family"
+              value={family}
+              maxLength={MAX_FONT_FAMILY_LENGTH}
+              placeholder={DEFAULT_FONT_FAMILY}
+              spellCheck={false}
+              autoComplete="off"
+              onChange={(e) => setFamily(e.target.value)}
+              onBlur={applyFamily}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter') return
+                e.preventDefault()
+                applyFamily()
+              }}
+            />
+          )}
+          <p className="field-hint">
+            {showCustom
+              ? 'Any CSS font family, e.g. "Comic Mono", monospace. Prompt icons work with any font.'
+              : 'Installed coding fonts. Prompt icons (Nerd Font glyphs) work with any font.'}
+          </p>
+        </div>
+      </div>
+      <SelectRow
+        label="Line height"
+        testId="settings-line-height"
+        value={String(settings.lineHeight)}
+        options={LINE_HEIGHTS.map((h) => [String(h), h === 1 ? '1.0 (default)' : h.toFixed(1)])}
+        onChange={(v) => settingsStore.update({ lineHeight: Number(v) })}
+      />
+      <SelectRow
+        label="Letter spacing"
+        testId="settings-letter-spacing"
+        value={String(settings.letterSpacing)}
+        options={LETTER_SPACINGS.map((n) => [String(n), n === 0 ? '0 px (default)' : `${n} px`])}
+        onChange={(v) => settingsStore.update({ letterSpacing: Number(v) })}
+      />
+    </>
+  )
+}
+
 const OTHER_SHELL = '__other__'
 
+const LINE_HEIGHTS = Array.from({ length: 11 }, (_, i) => Math.round((1 + i / 10) * 10) / 10)
+const LETTER_SPACINGS = Array.from({ length: MAX_LETTER_SPACING + 1 }, (_, i) => i)
+const CURSOR_LABELS: Record<CursorStyle, string> = {
+  block: 'Block',
+  bar: 'Bar',
+  underline: 'Underline'
+}
+const BELL_LABELS: Record<Bell, string> = { none: 'None', flash: 'Flash', sound: 'Sound' }
+
+/** A setting with its label on the left and an on/off switch on the right. */
+function SwitchRow({
+  label,
+  hint,
+  testId,
+  checked,
+  disabled,
+  onChange
+}: {
+  label: string
+  hint?: string
+  testId: string
+  checked: boolean
+  disabled?: boolean
+  onChange: (checked: boolean) => void
+}): React.JSX.Element {
+  const id = useId()
+  return (
+    <div className="settings-row">
+      <label className="settings-label" htmlFor={id}>
+        {label}
+      </label>
+      <div className="settings-control">
+        <span className="switch">
+          <input
+            id={id}
+            type="checkbox"
+            role="switch"
+            data-testid={testId}
+            checked={checked}
+            disabled={disabled}
+            onChange={(e) => onChange(e.target.checked)}
+          />
+          <span className="switch-track" aria-hidden="true" />
+        </span>
+        {hint && <p className="field-hint">{hint}</p>}
+      </div>
+    </div>
+  )
+}
+
+/** A setting chosen from a short list, as a select. */
+function SelectRow({
+  label,
+  hint,
+  testId,
+  value,
+  options,
+  onChange
+}: {
+  label: string
+  hint?: string
+  testId: string
+  value: string
+  options: [value: string, label: string][]
+  onChange: (value: string) => void
+}): React.JSX.Element {
+  const id = useId()
+  return (
+    <div className="settings-row">
+      <label className="settings-label" htmlFor={id}>
+        {label}
+      </label>
+      <div className="settings-control">
+        <select
+          id={id}
+          className="settings-input settings-select-short"
+          data-testid={testId}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        >
+          {options.map(([v, text]) => (
+            <option key={v} value={v}>
+              {text}
+            </option>
+          ))}
+        </select>
+        {hint && <p className="field-hint">{hint}</p>}
+      </div>
+    </div>
+  )
+}
+
+/** A setting with a few choices side by side, as a segmented control. */
+function SegmentedRow<T extends string>({
+  label,
+  testId,
+  value,
+  labels,
+  onChange
+}: {
+  label: string
+  testId: string
+  value: T
+  labels: Record<T, string>
+  onChange: (value: T) => void
+}): React.JSX.Element {
+  const id = useId()
+  return (
+    <fieldset className="settings-row">
+      <legend className="settings-label">{label}</legend>
+      <div className="segmented">
+        {(Object.keys(labels) as T[]).map((key) => (
+          <label key={key} className="radio">
+            <input
+              type="radio"
+              name={`${id}-${testId}`}
+              data-testid={`${testId}-${key}`}
+              checked={value === key}
+              onChange={() => onChange(key)}
+            />
+            {labels[key]}
+          </label>
+        ))}
+      </div>
+    </fieldset>
+  )
+}
+
+/** The terminal's behaviour: cursor, bold colours, scrollback, bell and input. */
+function TerminalBehaviourRows(): React.JSX.Element {
+  const settings = useSettings()
+  return (
+    <>
+      <SegmentedRow
+        label="Cursor"
+        testId="settings-cursor"
+        value={settings.cursorStyle}
+        labels={CURSOR_LABELS}
+        onChange={(cursorStyle) => settingsStore.update({ cursorStyle })}
+      />
+      <SwitchRow
+        label="Blinking cursor"
+        testId="settings-cursor-blink"
+        checked={settings.cursorBlink}
+        onChange={(cursorBlink) => settingsStore.update({ cursorBlink })}
+      />
+      <SwitchRow
+        label="Bold in bright colours"
+        hint="Bold text uses the bright ANSI colours, as most terminals do."
+        testId="settings-bold-bright"
+        checked={settings.boldBright}
+        onChange={(boldBright) => settingsStore.update({ boldBright })}
+      />
+      <SelectRow
+        label="Scrollback"
+        hint="Lines each terminal keeps above the screen; more use more memory per card."
+        testId="settings-scrollback"
+        value={String(settings.scrollback)}
+        options={SCROLLBACK_CHOICES.map((n) => [String(n), `${n.toLocaleString('en-US')} lines`])}
+        onChange={(v) => settingsStore.update({ scrollback: Number(v) })}
+      />
+      <SegmentedRow
+        label="Bell"
+        testId="settings-bell"
+        value={settings.bell}
+        labels={BELL_LABELS}
+        onChange={(bell) => settingsStore.update({ bell })}
+      />
+      <SwitchRow
+        label="Copy on select"
+        hint="Selecting text in a terminal copies it."
+        testId="settings-copy-on-select"
+        checked={settings.copyOnSelect}
+        onChange={(copyOnSelect) => settingsStore.update({ copyOnSelect })}
+      />
+      {window.drovr.platform === 'darwin' && (
+        <SwitchRow
+          label="Option as Meta"
+          hint="Option+B, Option+F and Alt shortcuts reach the shell instead of typing ∫ or ƒ."
+          testId="settings-option-meta"
+          checked={settings.optionAsMeta}
+          onChange={(optionAsMeta) => settingsStore.update({ optionAsMeta })}
+        />
+      )}
+    </>
+  )
+}
+
+/** Agents: being told when one needs you, and Claude Code's status line. */
+function AgentsSection(): React.JSX.Element {
+  const settings = useSettings()
+  return (
+    <>
+      <SwitchRow
+        label="Notifications"
+        hint="When an agent is waiting for you or needs your answer, unless its card is in view. The Dock shows how many are waiting."
+        testId="settings-notifications"
+        checked={settings.notifications}
+        onChange={(notifications) => settingsStore.update({ notifications })}
+      />
+      <SwitchRow
+        label="Notification sound"
+        testId="settings-notification-sound"
+        checked={settings.notificationSound}
+        disabled={!settings.notifications}
+        onChange={(notificationSound) => settingsStore.update({ notificationSound })}
+      />
+      <SwitchRow
+        label="Claude Code status"
+        hint="Claude Code cards write a one-line status after every turn. Applies to cards started from now on."
+        testId="settings-claude-status"
+        checked={settings.claudeStatus}
+        onChange={(claudeStatus) => settingsStore.update({ claudeStatus })}
+      />
+    </>
+  )
+}
+
+/** A shell's name and where it is: `fish — /opt/homebrew/bin/fish`. */
+function shellLabel(path: string): string {
+  return `${path.slice(path.lastIndexOf('/') + 1)} — ${path}`
+}
+
 /**
- * The Shell section: the login shell, the shells in `/etc/shells`, or another absolute path (applied
- * on blur or Enter). New cards and panes start it; running ones keep theirs. SSH cards are unaffected.
+ * The Shell section: the login shell, the shells found on this machine, or another absolute path
+ * (applied on blur or Enter). New cards and panes start it; running ones keep theirs. SSH cards
+ * are unaffected.
  */
 function ShellField(): React.JSX.Element {
   const { shell } = useSettings()
@@ -218,64 +666,94 @@ function ShellField(): React.JSX.Element {
   const selectId = `${id}-shell`
   const errorId = `${id}-shell-error`
   return (
-    <div className="field">
-      <label htmlFor={selectId}>Shell</label>
-      <select
-        id={selectId}
-        data-testid="settings-shell"
-        value={showOther ? OTHER_SHELL : shell}
-        onChange={(e) => {
-          const value = e.target.value
-          setInvalid(false)
-          if (value === OTHER_SHELL) {
-            setOther(true)
-            setPath(shell)
-            return
-          }
-          setOther(false)
-          settingsStore.update({ shell: value })
-        }}
-      >
-        <option value="">Login shell{choices ? ` (${choices.login})` : ''}</option>
-        {choices?.shells.map((s) => (
-          <option key={s} value={s}>
-            {s}
-          </option>
-        ))}
-        <option value={OTHER_SHELL}>Other…</option>
-      </select>
-      {showOther && (
-        <input
-          data-testid="settings-shell-path"
-          aria-label="Shell path"
-          value={path}
-          placeholder="/path/to/shell"
-          spellCheck={false}
-          autoComplete="off"
-          aria-invalid={invalid ? true : undefined}
-          aria-describedby={invalid ? errorId : undefined}
-          onChange={(e) => setPath(e.target.value)}
-          onBlur={applyPath}
-          onKeyDown={(e) => {
-            if (e.key !== 'Enter') return
-            e.preventDefault()
-            applyPath()
+    <div className="settings-row">
+      <label className="settings-label" htmlFor={selectId}>
+        Shell
+      </label>
+      <div className="settings-control">
+        <select
+          id={selectId}
+          className="settings-input"
+          data-testid="settings-shell"
+          value={showOther ? OTHER_SHELL : shell}
+          onChange={(e) => {
+            const value = e.target.value
+            setInvalid(false)
+            if (value === OTHER_SHELL) {
+              setOther(true)
+              setPath(shell)
+              return
+            }
+            setOther(false)
+            settingsStore.update({ shell: value })
           }}
-        />
-      )}
-      {invalid && (
-        <p className="field-error" id={errorId} role="alert" data-testid="settings-error-shell">
-          {SHELL_NOT_ABSOLUTE}
-        </p>
-      )}
-      <p className="field-hint">New cards and panes start it; SSH cards use the remote shell.</p>
+        >
+          <option value="">
+            {choices ? `Login shell — ${shellLabel(choices.login)}` : 'Login shell'}
+          </option>
+          {choices?.shells.map((s) => (
+            <option key={s} value={s}>
+              {shellLabel(s)}
+            </option>
+          ))}
+          <option value={OTHER_SHELL}>Other…</option>
+        </select>
+        {showOther && (
+          <input
+            className="settings-input"
+            data-testid="settings-shell-path"
+            aria-label="Shell path"
+            value={path}
+            placeholder="/path/to/shell"
+            spellCheck={false}
+            autoComplete="off"
+            aria-invalid={invalid ? true : undefined}
+            aria-describedby={invalid ? errorId : undefined}
+            onChange={(e) => setPath(e.target.value)}
+            onBlur={applyPath}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter') return
+              e.preventDefault()
+              applyPath()
+            }}
+          />
+        )}
+        {invalid && (
+          <p className="field-error" id={errorId} role="alert" data-testid="settings-error-shell">
+            {SHELL_NOT_ABSOLUTE}
+          </p>
+        )}
+        <p className="field-hint">New cards and panes start it; SSH cards use the remote shell.</p>
+      </div>
     </div>
   )
 }
 
+/** The last two parts of a config path, the whole of it in the tooltip. */
+function shortPath(path: string): string {
+  const parts = path.split('/')
+  return parts.length > 3 ? `…/${parts.slice(-2).join('/')}` : path
+}
+
+/** The resolved app appearance, following the OS under System. */
+function useResolvedTheme(): ResolvedTheme {
+  const { theme } = useSettings()
+  const osDark = useSyncExternalStore(
+    (listener) => {
+      const query = window.matchMedia('(prefers-color-scheme: dark)')
+      query.addEventListener('change', listener)
+      return () => query.removeEventListener('change', listener)
+    },
+    () => window.matchMedia('(prefers-color-scheme: dark)').matches
+  )
+  return resolveTheme(theme, osDark)
+}
+
 /**
- * The Terminal colours section: a theme for the dark app theme and one for the light one, each
- * picked in the theme picker, or the user's Ghostty colours instead (which disables both).
+ * The Terminal section: where the colours come from, Drovr's built-in themes (one for the dark
+ * app theme, one for the light, each picked in the theme picker) or the user's Ghostty config
+ * (with what was read and Reload), then a preview of the terminal in the colours and font in
+ * effect now.
  */
 function TerminalColoursField({
   onPick
@@ -284,6 +762,7 @@ function TerminalColoursField({
 }): React.JSX.Element {
   const settings = useSettings()
   const ghostty = useGhosttyTheme()
+  const resolved = useResolvedTheme()
   const id = useId()
   const [reading, setReading] = useState(false)
   const reload = (): void => {
@@ -292,75 +771,116 @@ function TerminalColoursField({
   }
 
   const useGhostty = settings.useGhosttyTheme
+  const palette = terminalPalette(settings, resolved, ghosttyStore.palettes())
   return (
-    <fieldset className="field terminal-colours">
-      <legend>Terminal colours</legend>
-      {(['dark', 'light'] as const).map((appearance) => {
-        const name =
-          appearance === 'dark' ? settings.terminalThemeDark : settings.terminalThemeLight
-        const theme = terminalTheme(name)!
-        return (
-          <div key={appearance} className="theme-choice">
-            <span className="theme-choice-label" id={`${id}-${appearance}`}>
-              {appearance === 'dark' ? 'Dark app theme' : 'Light app theme'}
-            </span>
-            <button
-              type="button"
-              className="btn theme-choice-btn"
-              data-testid={`settings-terminal-theme-${appearance}`}
-              aria-labelledby={`${id}-${appearance} ${id}-${appearance}-name`}
-              disabled={useGhostty}
-              onClick={() => onPick(appearance)}
-            >
-              <span className="theme-chips" style={{ background: theme.background }}>
-                {ANSI_COLOUR_NAMES.slice(1, 7).map((c) => (
-                  <span key={c} style={{ background: theme[c] }} />
-                ))}
-              </span>
-              <span id={`${id}-${appearance}-name`}>{name}</span>
-            </button>
-          </div>
-        )
-      })}
-      <label className="checkbox">
-        <input
-          type="checkbox"
-          data-testid="settings-use-ghostty"
-          checked={useGhostty}
-          onChange={(e) => {
-            const on = e.target.checked
-            settingsStore.update({ useGhosttyTheme: on })
-            if (on) reload()
-          }}
-        />
-        Use Ghostty theme
-      </label>
-      {useGhostty && (
-        <div className="ghostty-status">
-          <p className="field-hint" data-testid="settings-ghostty-status">
-            {ghostty === null
-              ? 'Reading the Ghostty config…'
-              : ghostty.files.length === 0
-                ? 'No Ghostty config found: Ghostty’s default colours.'
-                : `${ghostty.theme === null ? 'No theme set' : `Theme: ${ghostty.theme.replace(/,\s*/g, ', ')}`} · from ${ghostty.files.join(', ')}`}
-          </p>
-          {ghostty?.problems.map((problem) => (
-            <p key={problem} className="field-error" data-testid="settings-ghostty-problem">
-              {problem}
-            </p>
+    <>
+      <fieldset className="settings-row">
+        <legend className="settings-label">Colours</legend>
+        <div className="segmented">
+          {(
+            [
+              [false, 'Built-in themes', 'settings-colours-builtin'],
+              [true, 'From Ghostty', 'settings-use-ghostty']
+            ] as const
+          ).map(([value, label, testId]) => (
+            <label key={label} className="radio">
+              <input
+                type="radio"
+                name={`${id}-colours`}
+                data-testid={testId}
+                checked={useGhostty === value}
+                onChange={() => {
+                  settingsStore.update({ useGhosttyTheme: value })
+                  if (value) reload()
+                }}
+              />
+              {label}
+            </label>
           ))}
-          <button
-            type="button"
-            className="btn btn-small"
-            data-testid="settings-ghostty-reload"
-            disabled={reading}
-            onClick={reload}
-          >
-            Reload
-          </button>
+        </div>
+      </fieldset>
+      {!useGhostty &&
+        (['dark', 'light'] as const).map((appearance) => {
+          const name =
+            appearance === 'dark' ? settings.terminalThemeDark : settings.terminalThemeLight
+          const theme = terminalTheme(name)!
+          return (
+            <div key={appearance} className="settings-row">
+              <span className="settings-label" id={`${id}-${appearance}`}>
+                {appearance === 'dark' ? 'Dark app theme' : 'Light app theme'}
+              </span>
+              <div className="settings-control">
+                <button
+                  type="button"
+                  className="btn theme-choice-btn"
+                  data-testid={`settings-terminal-theme-${appearance}`}
+                  aria-labelledby={`${id}-${appearance} ${id}-${appearance}-name`}
+                  onClick={() => onPick(appearance)}
+                >
+                  <span className="theme-chips" style={{ background: theme.background }}>
+                    {ANSI_COLOUR_NAMES.slice(1, 7).map((c) => (
+                      <span key={c} style={{ background: theme[c] }} />
+                    ))}
+                  </span>
+                  <span id={`${id}-${appearance}-name`}>{name}</span>
+                  <ChevronRight {...SMALL_ICON} className="theme-choice-chevron" />
+                </button>
+              </div>
+            </div>
+          )
+        })}
+      {useGhostty && (
+        <div className="settings-row">
+          <span className="settings-label">Ghostty</span>
+          <div className="settings-control ghostty-status">
+            <div className="ghostty-status-line">
+              <p className="field-hint" data-testid="settings-ghostty-status">
+                {ghostty === null ? (
+                  'Reading the Ghostty config…'
+                ) : ghostty.files.length === 0 ? (
+                  'No Ghostty config found: Ghostty’s default colours.'
+                ) : (
+                  <>
+                    {ghostty.theme === null
+                      ? 'No theme set'
+                      : `Theme: ${ghostty.theme.replace(/,\s*/g, ', ')}`}
+                    {' · from '}
+                    <span title={ghostty.files.join('\n')}>
+                      {ghostty.files.map(shortPath).join(', ')}
+                    </span>
+                  </>
+                )}
+              </p>
+              <button
+                type="button"
+                className="icon-btn"
+                data-testid="settings-ghostty-reload"
+                aria-label="Reload the Ghostty config"
+                title="Reload the Ghostty config"
+                disabled={reading}
+                onClick={reload}
+              >
+                <RotateCw {...SMALL_ICON} />
+              </button>
+            </div>
+            {ghostty?.problems.map((problem) => (
+              <p key={problem} className="field-error" data-testid="settings-ghostty-problem">
+                {problem}
+              </p>
+            ))}
+          </div>
         </div>
       )}
-    </fieldset>
+      <div className="settings-preview">
+        <span className="settings-label">Preview</span>
+        <TerminalPreview
+          palette={palette}
+          fontFamily={withSymbols(settings.fontFamily)}
+          fontSize={settings.fontSize}
+        />
+      </div>
+      <TerminalBehaviourRows />
+    </>
   )
 }
 
@@ -404,72 +924,117 @@ function SyncFolderField({ id, errorId }: { id: string; errorId: string }): Reac
 
   const statusText = syncStatusText(status)
   return (
-    <div className="field">
-      <label htmlFor={id}>Sync folder</label>
-      <div className="field-row">
-        <input
-          id={id}
-          data-testid="settings-sync-folder"
-          value={text}
-          placeholder="Off"
-          spellCheck={false}
-          autoComplete="off"
-          aria-invalid={notFound ? true : undefined}
-          aria-describedby={notFound ? errorId : undefined}
-          onChange={(e) => setText(e.target.value)}
-          onBlur={apply}
-          onKeyDown={(e) => {
-            if (e.key !== 'Enter') return
-            e.preventDefault()
-            apply()
-          }}
-        />
-        <button
-          type="button"
-          className="btn"
-          data-testid="settings-sync-choose"
-          onClick={() => answer(window.drovr.sync.pickFolder())}
-        >
-          Choose…
-        </button>
-        {folder !== null && (
+    <div className="settings-row">
+      <label className="settings-label" htmlFor={id}>
+        Sync folder
+      </label>
+      <div className="settings-control">
+        <div className="field-row">
+          <input
+            id={id}
+            className="settings-input"
+            data-testid="settings-sync-folder"
+            value={text}
+            placeholder="Off"
+            spellCheck={false}
+            autoComplete="off"
+            aria-invalid={notFound ? true : undefined}
+            aria-describedby={notFound ? errorId : undefined}
+            onChange={(e) => setText(e.target.value)}
+            onBlur={apply}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter') return
+              e.preventDefault()
+              apply()
+            }}
+          />
           <button
             type="button"
             className="btn"
-            data-testid="settings-sync-off"
-            // Keeps the field focused, so its blur doesn't apply a typed folder before turning off.
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => {
-              setText('')
-              setNotFound(false)
-              ++request.current
-              void window.drovr.sync.setFolder(null)
-            }}
+            data-testid="settings-sync-choose"
+            onClick={() => answer(window.drovr.sync.pickFolder())}
           >
-            Turn off
+            Choose…
           </button>
+          {folder !== null && (
+            <button
+              type="button"
+              className="btn"
+              data-testid="settings-sync-off"
+              // Keeps the field focused, so its blur doesn't apply a typed folder before turning off.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                setText('')
+                setNotFound(false)
+                ++request.current
+                void window.drovr.sync.setFolder(null)
+              }}
+            >
+              Turn off
+            </button>
+          )}
+        </div>
+        {notFound && (
+          <p
+            className="field-error"
+            id={errorId}
+            role="alert"
+            data-testid="settings-error-sync-folder"
+          >
+            {SYNC_FOLDER_ERROR}
+          </p>
         )}
+        {statusText !== null && (
+          <p className="field-hint" data-testid="settings-sync-status">
+            {statusText}
+          </p>
+        )}
+        <p className="field-hint">
+          A folder your own sync tool (iCloud Drive, Dropbox, Syncthing…) carries between machines;
+          the board follows you. Empty turns sync off.
+        </p>
       </div>
-      {notFound && (
-        <p
-          className="field-error"
-          id={errorId}
-          role="alert"
-          data-testid="settings-error-sync-folder"
-        >
-          {SYNC_FOLDER_ERROR}
-        </p>
-      )}
-      {statusText !== null && (
-        <p className="field-hint" data-testid="settings-sync-status">
-          {statusText}
-        </p>
-      )}
     </div>
   )
 }
 
 export default SettingsDialog
+
+const MAC_KEYS: Readonly<Record<string, string>> = {
+  Ctrl: '⌃',
+  Alt: '⌥',
+  Shift: '⇧',
+  Cmd: '⌘',
+  ArrowUp: '↑',
+  ArrowDown: '↓',
+  ArrowLeft: '←',
+  ArrowRight: '→'
+}
+
+/**
+ * A shortcut as key caps: on macOS its symbols (`⇧⌘B`), elsewhere its keys joined with `+` (so the
+ * text stays `Ctrl+Shift+B`).
+ */
+function ShortcutKeys({
+  shortcut,
+  platform
+}: {
+  shortcut: string
+  platform: string
+}): React.JSX.Element {
+  const keys = shortcut.split(/\+(?=.)/)
+  const mac = platform === 'darwin'
+  return (
+    <span className="keys">
+      {keys.map((key, i) => (
+        <span key={i} className="keys-part">
+          {!mac && i > 0 && <span className="keys-plus">+</span>}
+          <kbd>{mac ? (MAC_KEYS[key] ?? key) : key}</kbd>
+        </span>
+      ))}
+    </span>
+  )
+}
 
 /**
  * The Shortcuts section (#31 D8): each configurable action with its shortcut and a Reset button.
@@ -514,7 +1079,7 @@ function ShortcutsSection({ keymap }: { keymap: Keymap }): React.JSX.Element {
 
   return (
     <fieldset className="field shortcuts" data-testid="settings-shortcuts">
-      <legend>Shortcuts</legend>
+      <legend className="visually-hidden">Shortcuts</legend>
       {SHORTCUT_ACTIONS.map((action) => {
         const labelId = `${id}-${action}`
         const errorId = `${id}-${action}-error`
@@ -543,12 +1108,16 @@ function ShortcutsSection({ keymap }: { keymap: Keymap }): React.JSX.Element {
               }}
             >
               <span id={`${id}-${action}-value`}>
-                {isRecording && error === null ? 'Press a shortcut…' : keymap[action]}
+                {isRecording && error === null ? (
+                  'Press a shortcut…'
+                ) : (
+                  <ShortcutKeys shortcut={keymap[action]} platform={platform} />
+                )}
               </span>
             </button>
             <button
               type="button"
-              className="btn btn-small"
+              className="btn btn-small shortcut-reset"
               data-testid={`settings-shortcut-reset-${action}`}
               aria-label={`Reset ${SHORTCUT_LABELS[action]}`}
               disabled={keymap[action] === defaults[action]}

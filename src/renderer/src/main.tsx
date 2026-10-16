@@ -3,8 +3,10 @@ import './assets/main.css'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import { startAttention } from './attention'
 import { listenForBoardRequests } from './board-requests'
 import { loadGhosttyTheme } from './ghostty'
+import { loadHomeDir } from './home'
 import { loadSettingsStore } from './settings'
 import { loadSymbolsFont } from './symbols-font'
 import { loadWorkspaceStore } from './store'
@@ -21,10 +23,12 @@ void Promise.all([
   loadWorkspaceStore(),
   loadSettingsStore().then(loadGhosttyTheme),
   loadSyncStatus(),
-  loadSymbolsFont()
+  loadSymbolsFont(),
+  loadHomeDir()
 ]).then(() => {
   listenForBoardRequests()
   listenForSyncBoards()
+  startAttention()
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <App />

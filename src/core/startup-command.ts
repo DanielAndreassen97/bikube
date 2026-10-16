@@ -45,6 +45,17 @@ export function checkStartup(startup: StartupCommand): Result<StartupCommand> {
   return { ok: true, value: { kind: 'custom', command } }
 }
 
+export const CLAUDE_STARTUP: StartupCommand = { kind: 'claude' }
+
+/**
+ * `checkStartup` for a card or a workspace's default for new cards: a card is an agent session,
+ * so `shell` is refused (plain shells are the workspace's Shells).
+ */
+export function checkCardStartup(startup: StartupCommand): Result<StartupCommand> {
+  if (startup.kind === 'shell') return fail('Choose an agent or a custom command')
+  return checkStartup(startup)
+}
+
 /**
  * The line to type into a freshly started shell, without the trailing Enter (`\r`, #5 D3),
  * or null when nothing is typed (Shell, or Claude Code with an agent session id that is not a
@@ -61,9 +72,12 @@ export function startLine(card: StartupState): string | null {
       const id = card.agentSessionId
       if (!UUID.test(id)) return null
       const claude = `claude --settings "$DROVR_CLAUDE_SETTINGS"`
+      // Started once its hooks reported a conversation (`board session`): resume it, or start that
+      // id fresh when it is gone. Before that, start the id fresh, or resume it when a conversation
+      // exists that the hooks couldn't report (no Drovr to reach, an older card).
       return card.claudeStarted
         ? `${claude} --resume ${id} || ${claude} --session-id ${id}`
-        : `${claude} --session-id ${id}`
+        : `${claude} --session-id ${id} || ${claude} --resume ${id}`
     }
     case 'custom':
       return card.startup.command
@@ -88,7 +102,8 @@ export function firstStart(card: StartupState): FirstStart | null {
     case 'custom':
       return null
     case 'claude':
-      return card.claudeStarted ? null : 'claude'
+      // Claude Code is started by its hooks' `board session`, once it has a conversation.
+      return null
     default:
       return card.startedAgents?.includes(card.startup.kind) ? null : card.startup.kind
   }

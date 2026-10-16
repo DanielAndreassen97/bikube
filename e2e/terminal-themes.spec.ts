@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { backToBoard, expectCardOpen, expectStatusOnBoard } from './card-view'
 import { launchApp, removeDataDirs } from './launch'
+import { plainCards } from './plain-cards'
 
 // The Shell setting, the terminal theme pickers and "Use Ghostty theme". Each test launches with
 // its own data directory.
@@ -23,6 +24,7 @@ async function workspaceWithCard(page: Page, title: string): Promise<void> {
   const dir = join(mkdtempSync(join(tmpdir(), 'drovr-themes-')), 'alpha')
   mkdirSync(dir)
   await page.getByTestId('workspace-add').click()
+  await plainCards(page)
   await page.getByTestId('workspace-directory').fill(dir)
   await page.getByTestId('workspace-name').fill('alpha')
   await page.getByTestId('workspace-submit').click()
@@ -78,8 +80,9 @@ test('the dark theme picker: search, preview, pick with Enter; Cancel and Escape
   await workspaceWithCard(page, 'api')
   await page.getByTestId('settings-open').click()
   await dialog(page).getByTestId('settings-theme-dark').check()
+  await dialog(page).getByTestId('settings-section-terminal').click()
 
-  // Cancel leaves the theme as it was and returns to Settings.
+  // Cancel leaves the theme as it was and returns to Settings, on the Terminal section.
   await dialog(page).getByTestId('settings-terminal-theme-dark').click()
   await expect(dialog(page).getByTestId('theme-picker')).toBeVisible()
   await expect(dialog(page).getByTestId('theme-filter-dark')).toHaveAttribute(
@@ -139,12 +142,14 @@ test("Use Ghostty theme reads the user's Ghostty config, per appearance, and is 
   await workspaceWithCard(page, 'api')
 
   await page.getByTestId('settings-open').click()
+  await dialog(page).getByTestId('settings-section-terminal').click()
   await dialog(page).getByTestId('settings-use-ghostty').check()
   await expect(dialog(page).getByTestId('settings-ghostty-status')).toContainText(
     'Theme: light:Catppuccin Latte, dark:Catppuccin Mocha'
   )
-  await expect(dialog(page).getByTestId('settings-terminal-theme-dark')).toBeDisabled()
-  await expect(dialog(page).getByTestId('settings-terminal-theme-light')).toBeDisabled()
+  // The built-in themes' pickers give way to what was read from Ghostty.
+  await expect(dialog(page).getByTestId('settings-terminal-theme-dark')).toHaveCount(0)
+  await expect(dialog(page).getByTestId('settings-terminal-theme-light')).toHaveCount(0)
   // Playwright pins a light page: Latte, with the config's own red over the theme's.
   await expect.poll(async () => (await openTerminal(page)).background).toBe('#eff1f5')
   expect((await openTerminal(page)).red).toBe('#ff0000')
@@ -167,7 +172,8 @@ test("Use Ghostty theme reads the user's Ghostty config, per appearance, and is 
 
   // Turned off: the picked themes again.
   await page.getByTestId('settings-open').click()
-  await dialog(page).getByTestId('settings-use-ghostty').uncheck()
+  await dialog(page).getByTestId('settings-section-terminal').click()
+  await dialog(page).getByTestId('settings-colours-builtin').check()
   await expect.poll(async () => (await openTerminal(page)).background).toBe('#14151a')
 })
 
@@ -176,8 +182,11 @@ test('the Shell setting: a listed shell starts new cards with $SHELL set; a miss
   app = launched.app
   const { page, dataDir } = launched
   await page.getByTestId('settings-open').click()
+  await dialog(page).getByTestId('settings-section-shell').click()
   const shell = dialog(page).getByTestId('settings-shell')
-  await expect(shell.locator('option').first()).toHaveText(/^Login shell \(.+\)$/)
+  // Shells by name, then path: `Login shell — zsh — /bin/zsh`, `sh — /bin/sh`.
+  await expect(shell.locator('option').first()).toHaveText(/^Login shell — \S+ — \/.+$/)
+  await expect(shell.locator('option[value="/bin/sh"]')).toHaveText('sh — /bin/sh')
   await shell.selectOption('/bin/sh')
   await expect.poll(() => savedSettings(dataDir).shell).toBe('/bin/sh')
   await page.keyboard.press('Escape')
@@ -190,6 +199,7 @@ test('the Shell setting: a listed shell starts new cards with $SHELL set; a miss
 
   // Another path, typed; one that doesn't exist refuses to start.
   await page.getByTestId('settings-open').click()
+  await dialog(page).getByTestId('settings-section-shell').click()
   await shell.selectOption({ label: 'Other…' })
   const path = dialog(page).getByTestId('settings-shell-path')
   await path.fill('fish')
@@ -203,4 +213,100 @@ test('the Shell setting: a listed shell starts new cards with $SHELL set; a miss
   await backToBoard(page)
   await newCard(page, 'missing')
   await expectStatusOnBoard(page, 'missing', "Couldn't start: shell not found: /nonexistent/fish")
+})
+
+/** The open card's xterm options that the terminal settings set. */
+function openOptions(page: Page): Promise<Record<string, unknown>> {
+  return page.evaluate(() => {
+    const host = document.querySelector('[data-testid=card-view] [data-testid=terminal]') as
+      (HTMLElement & { __xterm?: { options: Record<string, unknown> } }) | null
+    const o = host?.__xterm?.options ?? {}
+    return {
+      cursorStyle: o.cursorStyle,
+      cursorBlink: o.cursorBlink,
+      scrollback: o.scrollback,
+      lineHeight: o.lineHeight,
+      letterSpacing: o.letterSpacing,
+      drawBoldTextInBrightColors: o.drawBoldTextInBrightColors
+    }
+  })
+}
+
+test('terminal settings reach the open terminal at once and are saved only when changed', async () => {
+  const launched = await launchApp()
+  app = launched.app
+  const { page, dataDir } = launched
+  await workspaceWithCard(page, 'api')
+  expect(await openOptions(page)).toEqual({
+    cursorStyle: 'block',
+    cursorBlink: false,
+    scrollback: 10000,
+    lineHeight: 1,
+    letterSpacing: 0,
+    drawBoldTextInBrightColors: true
+  })
+
+  await page.getByTestId('settings-open').click()
+  await dialog(page).getByTestId('settings-line-height').selectOption('1.2')
+  await dialog(page).getByTestId('settings-section-terminal').click()
+  await dialog(page).getByTestId('settings-cursor-bar').check()
+  await dialog(page).getByTestId('settings-cursor-blink').check()
+  await dialog(page).getByTestId('settings-scrollback').selectOption('50000')
+  await expect
+    .poll(() => openOptions(page))
+    .toMatchObject({ cursorStyle: 'bar', cursorBlink: true, scrollback: 50000, lineHeight: 1.2 })
+  await expect
+    .poll(() => savedSettings(dataDir))
+    .toMatchObject({ cursorStyle: 'bar', cursorBlink: true, scrollback: 50000, lineHeight: 1.2 })
+  // Untouched preferences stay out of the file.
+  expect(savedSettings(dataDir)).not.toHaveProperty('letterSpacing')
+  expect(savedSettings(dataDir)).not.toHaveProperty('bell')
+})
+
+test('copy on select puts a selection on the clipboard', async () => {
+  const launched = await launchApp()
+  app = launched.app
+  const { page } = launched
+  await workspaceWithCard(page, 'api')
+  await page.getByTestId('settings-open').click()
+  await dialog(page).getByTestId('settings-section-terminal').click()
+  await dialog(page).getByTestId('settings-copy-on-select').check()
+  await page.keyboard.press('Escape')
+
+  await app.evaluate(({ clipboard }) => clipboard.writeText('before'))
+  await page.getByTestId('card-view').getByTestId('terminal').click()
+  await page.keyboard.type('echo copy-me-please')
+  await page.keyboard.press('Enter')
+  await expect.poll(async () => (await openTerminal(page)).lines).toContain('copy-me-please')
+  await page.evaluate(() => {
+    const host = document.querySelector('[data-testid=card-view] [data-testid=terminal]') as
+      (HTMLElement & { __xterm?: { selectAll(): void } }) | null
+    host?.__xterm?.selectAll()
+  })
+  await expect
+    .poll(() => app!.evaluate(({ clipboard }) => clipboard.readText()))
+    .toContain('copy-me-please')
+})
+
+test('Claude Code status updates: new cards get DROVR_CLAUDE_STATUS 1, or 0 once turned off', async () => {
+  const launched = await launchApp()
+  app = launched.app
+  const { page, dataDir } = launched
+  await workspaceWithCard(page, 'on')
+  await page.getByTestId('card-view').getByTestId('terminal').click()
+  await page.keyboard.type('echo "status=$DROVR_CLAUDE_STATUS"')
+  await page.keyboard.press('Enter')
+  await expect.poll(async () => (await openTerminal(page)).lines).toContain('status=1')
+
+  await page.getByTestId('settings-open').click()
+  await dialog(page).getByTestId('settings-section-agents').click()
+  await dialog(page).getByTestId('settings-claude-status').uncheck()
+  await expect.poll(() => savedSettings(dataDir).claudeStatus).toBe(false)
+  await page.keyboard.press('Escape')
+  await backToBoard(page)
+  await newCard(page, 'off')
+  await page.getByTestId('card-view').getByTestId('terminal').click()
+  await page.keyboard.type('echo "status=$DROVR_CLAUDE_STATUS"')
+  await page.keyboard.press('Enter')
+  await expect.poll(async () => (await openTerminal(page)).lines).toContain('status=0')
 })

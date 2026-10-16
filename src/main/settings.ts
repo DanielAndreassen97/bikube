@@ -8,13 +8,13 @@ import {
   renameSync,
   writeFileSync
 } from 'node:fs'
-import { access, readFile } from 'node:fs/promises'
+import { access, readFile, realpath } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { homedir } from 'node:os'
 import { readGhosttyTheme } from '../core/ghostty-config'
 import { SessionManager } from '../core/session-manager'
 import { SettingsFile } from '../core/settings-file'
-import { parseEtcShells } from '../core/shells'
+import { shellCandidates } from '../core/shells'
 import { THEME_BACKGROUNDS, type Settings } from '../core/settings'
 import { IPC, type ShellChoices } from '../shared/api'
 
@@ -26,6 +26,8 @@ export interface MainSettings {
   flush(): void
   /** The Shell setting: an absolute path, or '' for the login shell. */
   shell(): string
+  /** The Claude Code status updates setting. */
+  claudeStatus(): boolean
   /** The sync folder kept in the settings file (#13 D10), or null when sync is off. */
   syncFolder(): string | null
   /** Keeps `folder` (already checked) as the sync folder, or null for off, and writes the file. */
@@ -69,9 +71,21 @@ export function registerSettings(): MainSettings {
 
   ipcMain.handle(IPC.settingsShells, async (event): Promise<ShellChoices> => {
     if (!fromMainFrame(event)) throw new Error('settings:shells rejected: untrusted sender')
-    const listed = parseEtcShells((await readText('/etc/shells')) ?? '')
-    const runnable = await Promise.all(listed.map(isExecutable))
-    return { login: SessionManager.defaultShell(), shells: listed.filter((_, i) => runnable[i]) }
+    const listed = shellCandidates((await readText('/etc/shells')) ?? '', homedir())
+    // The same file through another path (Linux's /bin → /usr/bin) is listed once, first path kept.
+    const resolved = await Promise.all(
+      listed.map(async (path) =>
+        (await isExecutable(path)) ? realpath(path).catch(() => null) : null
+      )
+    )
+    const seen = new Set<string>()
+    const shells = listed.filter((_, i) => {
+      const real = resolved[i]
+      if (!real || seen.has(real)) return false
+      seen.add(real)
+      return true
+    })
+    return { login: SessionManager.defaultShell(), shells }
   })
   ipcMain.handle(IPC.settingsGhosttyTheme, async (event) => {
     if (!fromMainFrame(event)) throw new Error('settings:ghosttyTheme rejected: untrusted sender')
@@ -85,6 +99,7 @@ export function registerSettings(): MainSettings {
 
   return {
     shell: () => file.load().shell,
+    claudeStatus: () => file.load().claudeStatus,
     applyTheme: () => applyTheme(file.load()),
     backgroundColor: () => THEME_BACKGROUNDS[nativeTheme.shouldUseDarkColors ? 'dark' : 'light'],
     flush: () => file.flush(),

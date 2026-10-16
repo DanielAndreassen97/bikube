@@ -10,6 +10,7 @@ import {
   splitRight
 } from './card-view'
 import { launchApp, removeDataDirs } from './launch'
+import { plainCards } from './plain-cards'
 
 // Cards as terminals (#4): creation, full-size view, status, lifetime. Linux runs drive
 // Ctrl+Shift+B; Cmd+Shift+B on macOS is checked by hand (spec: test seams).
@@ -36,6 +37,7 @@ test.afterEach(async () => {
 
 async function createWorkspace(dir: string, name: string): Promise<void> {
   await page.getByTestId('workspace-add').click()
+  await plainCards(page)
   await page.getByTestId('workspace-directory').fill(dir)
   await page.getByTestId('workspace-name').fill(name)
   await page.getByTestId('workspace-submit').click()
@@ -162,6 +164,22 @@ test('#31 AC2: the Back shortcut and the active workspace go back; the card keep
   await expect(page.getByTestId('board')).toBeVisible()
   await expect(page.getByTestId('card-view')).toHaveCount(0)
   await expect(card('api').getByTestId('card-status-label')).toHaveText('Running')
+})
+
+test('the title bar names the open card, and its workspace name goes back to the board', async () => {
+  await createWorkspace(makeDir('alpha'), 'alpha')
+  await newCard('Backlog', 'api')
+  const bar = page.getByTestId('titlebar')
+  await expect(bar.getByTestId('titlebar-card')).toHaveText('api')
+  await expect(page).toHaveTitle('api — alpha')
+
+  await bar.getByTestId('titlebar-workspace').click()
+  await expect(page.getByTestId('board')).toBeVisible()
+  await expect(card('api').getByTestId('card-status-label')).toHaveText('Running')
+  // On the board the workspace name is the title, not a button.
+  await expect(bar.getByTestId('titlebar-workspace')).toHaveCount(0)
+  await expect(bar).toContainText('alpha')
+  await expect(page).toHaveTitle('alpha')
 })
 
 test('AC3: Back and Ctrl+Shift+B return to the board; Esc goes to the terminal', async () => {
@@ -334,7 +352,7 @@ test('AC8: each card keeps the directory it was created in', async () => {
 
 test('D4/D5/D7: inline creation cancels, defaults the title, Enter opens a focused card', async () => {
   await createWorkspace(makeDir('alpha'), 'alpha')
-  const running = column('Running')
+  const running = column('In Progress')
 
   // Esc cancels; blur with nothing typed cancels.
   await running.getByTestId('new-card').click()
@@ -357,7 +375,7 @@ test('D4/D5/D7: inline creation cancels, defaults the title, Enter opens a focus
 
   // A long title stays on one line with the full title in the tooltip.
   const long = 'a very long card title that will not fit on one line of the column at all'
-  await newCard('Running', long)
+  await newCard('In Progress', long)
   await back()
   await expect(card(long).getByTestId('card-title')).toHaveAttribute('title', long)
   await expect(running.getByTestId('card').last()).toContainText(long)
@@ -519,7 +537,7 @@ test('AC12: deleting a workspace names its running terminals and stops them', as
   await newCard('Backlog', 'two')
   const two = await shellPid()
   await back()
-  await newCard('Running', 'old')
+  await newCard('In Progress', 'old')
   await expect.poll(terminalFocused).toBe(true)
   await run('exit 0')
   await stoppedToBoard('old')
@@ -612,11 +630,11 @@ test('AC2: default titles count on per workspace; duplicate titles are allowed',
     'Terminal 4'
   ])
 
-  await newCard('Running', 'api')
+  await newCard('In Progress', 'api')
   await back()
-  await newCard('Running', 'api')
+  await newCard('In Progress', 'api')
   await back()
-  await expect(column('Running').getByTestId('card-title')).toHaveText(['api', 'api'])
+  await expect(column('In Progress').getByTestId('card-title')).toHaveText(['api', 'api'])
 })
 
 test('D15: the workspace delete dialog follows terminals that exit while it is open', async () => {

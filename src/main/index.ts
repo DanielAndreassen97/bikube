@@ -4,6 +4,7 @@ import { boundedWait } from '../core/bounded-wait'
 import { killAtQuit, quitHold } from '../core/quit-hold'
 import { KILL_GRACE_MS } from '../core/session-manager'
 import { boardShellEnvFor, boardSocketPath, registerBoard, sshBoardSockets } from './board'
+import { registerAttention } from './attention'
 import { registerClipboard } from './clipboard'
 import { registerDirectories } from './directories'
 import { installAppMenu } from './menu'
@@ -11,12 +12,21 @@ import { registerSettings, type MainSettings } from './settings'
 import { registerState } from './state'
 import { registerSync } from './sync'
 import { registerTerminals } from './terminals'
+import { registerWorktrees } from './worktrees'
 
 /**
  * The longest one quit hold waits for the shells to exit (#18 D2) and the sync folder's flush
  * (#26 D5): the kill's grace period + 1 s.
  */
 const QUIT_WAIT_MS = KILL_GRACE_MS + 1_000
+
+/**
+ * Smoke tests on macOS run with the window never shown and no Dock icon (`DROVR_E2E_HIDDEN=1`, set
+ * by `e2e/launch.ts`), so a run doesn't take over the screen; Chromium's throttling of hidden
+ * windows is off then, so timers and drawing run as in a shown one. Only the development build
+ * the tests launch honours it: a packaged app always shows its window.
+ */
+const hiddenForTests = !app.isPackaged && process.env['DROVR_E2E_HIDDEN'] === '1'
 
 function createWindow(settings: MainSettings): void {
   const mainWindow = new BrowserWindow({
@@ -29,15 +39,23 @@ function createWindow(settings: MainSettings): void {
     // Off macOS the default menu bar stays hidden until Alt is pressed; its accelerators still
     // work (#14 D9). macOS keeps its app menu.
     autoHideMenuBar: process.platform !== 'darwin',
+    // On macOS Drovr draws its own title bar, with the window buttons inset over the sidebar.
+    ...(process.platform === 'darwin' && {
+      titleBarStyle: 'hiddenInset' as const,
+      trafficLightPosition: { x: 14, y: 13 }
+    }),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      ...(hiddenForTests && { backgroundThrottling: false })
     }
   })
 
-  mainWindow.on('ready-to-show', () => mainWindow.show())
+  mainWindow.on('ready-to-show', () => {
+    if (!hiddenForTests) mainWindow.show()
+  })
 
   const devUrl = process.env['ELECTRON_RENDERER_URL']
   if (!app.isPackaged && devUrl) {
@@ -71,11 +89,16 @@ function startApp(): void {
   const socketPath = boardSocketPath()
   // Each SSH session's own `board` socket (#25 D2), relaying once `registerBoard` runs.
   const sshBoard = sshBoardSockets(socketPath)
-  const terminals = registerTerminals(boardShellEnvFor(socketPath), sshBoard.sockets, () =>
-    settings.shell()
+  const terminals = registerTerminals(
+    boardShellEnvFor(socketPath),
+    sshBoard.sockets,
+    () => settings.shell(),
+    () => settings.claudeStatus()
   )
   registerClipboard()
   registerDirectories()
+  registerAttention()
+  registerWorktrees()
 
   // The app is one local page: a dropped file or link must never replace it and inherit the bridge.
   // `about:blank` never fires `will-navigate`; the preload cancels it (#20).
@@ -139,6 +162,7 @@ function startApp(): void {
     app.on('will-quit', closeBoard)
     settings.applyTheme()
     installAppMenu()
+    if (hiddenForTests) app.dock?.hide()
     createWindow(settings)
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow(settings)

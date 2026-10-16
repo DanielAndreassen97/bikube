@@ -7,9 +7,14 @@
 
 import type { AgentKind } from './agent-presets'
 import { checkHost, checkRemoteDirectory } from './ssh-location'
-import { SHELL_STARTUP, checkStartup, type StartupCommand } from './startup-command'
+import {
+  CLAUDE_STARTUP,
+  checkCardStartup,
+  checkStartup,
+  type StartupCommand
+} from './startup-command'
 
-export const DEFAULT_COLUMN_NAMES = ['Backlog', 'Running', 'Needs me', 'Done'] as const
+export const DEFAULT_COLUMN_NAMES = ['Backlog', 'In Progress', 'Review', 'Done'] as const
 
 export interface Column {
   id: string
@@ -24,9 +29,11 @@ export interface Card {
   title: string
   /**
    * Copied from the workspace at creation and never changed (#4 D2): an absolute local path, or
-   * for an SSH card a path on its host (#12 D3).
+   * for an SSH card a path on its host (#12 D3). A worktree card's is in its worktree.
    */
   directory: string
+  /** The card's own git worktree, when it was created with one; absent otherwise. */
+  worktree?: CardWorktree
   /** The SSH host, copied from the workspace at creation and never changed; absent when local (#12 D1). */
   host?: string
   /** What is typed into the shell on every start (#5 D2); changed only per card (#5 D11). */
@@ -40,6 +47,21 @@ export interface Card {
    * the startup command.
    */
   startedAgents: AgentKind[]
+}
+
+/** Where a card's own git worktree is, and how to remove it. */
+export interface CardWorktree {
+  /** The worktree's top folder (the card's directory is it, or a folder inside it). */
+  path: string
+  branch: string
+  /** The workspace folder it was made from, which git removes it through. */
+  repo: string
+}
+
+/** A card created in its own worktree instead of the workspace's folder. */
+export interface NewCardWorktree {
+  directory: string
+  worktree: CardWorktree
 }
 
 export interface Workspace {
@@ -61,9 +83,36 @@ export interface Workspace {
   cards: Card[]
   /** N for the next default `Terminal N` title; starts at 1, never reused (#4 D5). */
   nextCardNumber: number
-  /** Preset for new cards only; `shell` for a new workspace (#5 D10). */
+  /** Preset for new cards only; Claude Code for a new workspace (#5 D10). Never `shell`. */
   defaultStartup: StartupCommand
+  /**
+   * The workspace's shells: terminals that aren't tasks (a dev server, a test watcher), shown above
+   * the board, not on it. The Default shell isn't stored: every workspace has it.
+   */
+  shells: WorkspaceShell[]
 }
+
+/** A named shell in the workspace's folder, which types `command` (when set) each time it starts. */
+export interface WorkspaceShell {
+  id: string
+  /** Trimmed, never empty. */
+  name: string
+  /** One line typed after each start; '' for none. */
+  command: string
+  /** Started when its workspace is first opened in a run of the app. */
+  autostart: boolean
+}
+
+export interface ShellInput {
+  name: string
+  command: string
+  autostart: boolean
+}
+
+export const MAX_SHELL_NAME_LENGTH = 100
+
+/** The id of a workspace's Default shell: a plain shell in its folder, never stored. */
+export const defaultShellId = (workspaceId: string): string => `default-shell:${workspaceId}`
 
 export interface WorkspaceState {
   workspaces: Workspace[]
@@ -73,7 +122,7 @@ export interface WorkspaceState {
 
 /** Which input an error belongs to, so the UI can show it inline under that field. */
 export type ErrorField =
-  'name' | 'directory' | 'host' | 'column' | 'workspace' | 'title' | 'card' | 'command'
+  'name' | 'directory' | 'host' | 'column' | 'workspace' | 'title' | 'card' | 'command' | 'shell'
 
 export interface FieldError {
   field: ErrorField
@@ -116,13 +165,15 @@ export interface WorkspaceStore {
   deleteColumn(workspaceId: string, columnId: string): Result<void>
   /**
    * Adds a card at the bottom of the column; an empty title becomes `Terminal N`. `startup`
-   * defaults to the workspace's default startup command (#5 D9, D10).
+   * defaults to the workspace's default startup command (#5 D9, D10). With `worktree` (a local
+   * workspace only) the card runs in that worktree instead of the workspace's folder.
    */
   createCard(
     workspaceId: string,
     columnId: string,
     title: string,
-    startup?: StartupCommand
+    startup?: StartupCommand,
+    worktree?: NewCardWorktree
   ): Result<Card>
   renameCard(workspaceId: string, cardId: string, title: string): Result<Card>
   deleteCard(workspaceId: string, cardId: string): Result<void>
@@ -134,8 +185,17 @@ export interface WorkspaceStore {
   moveCard(workspaceId: string, cardId: string, toColumnId: string, toIndex: number): Result<void>
   /** Changes only the setting, used at the card's next start (#5 D11). */
   setCardStartup(workspaceId: string, cardId: string, startup: StartupCommand): Result<Card>
+  /** Adds a shell at the end of the workspace's shells; name required, command one line or ''. */
+  createShell(workspaceId: string, input: ShellInput): Result<WorkspaceShell>
+  updateShell(workspaceId: string, shellId: string, input: ShellInput): Result<WorkspaceShell>
+  deleteShell(workspaceId: string, shellId: string): Result<void>
   /** Records that `claude --session-id` was typed for this card (#5 D5). */
   markClaudeStarted(workspaceId: string, cardId: string): Result<Card>
+  /**
+   * The Claude Code session the card resumes from now on, reported by Drovr's hooks once it has
+   * a conversation (a message sent, a `/resume`): its agent session id, and started.
+   */
+  setAgentSession(workspaceId: string, cardId: string, sessionId: string): Result<Card>
   /** Records that the preset's first-start line was typed for this card (#21 D3). */
   markAgentStarted(workspaceId: string, cardId: string, kind: AgentKind): Result<Card>
   /**
@@ -228,7 +288,7 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
     const { directory, host } = location.value
     const name = this.checkName(input.name.trim() || defaultWorkspaceName(directory, host), null)
     if (!name.ok) return name
-    const startup = checkStartup(input.defaultStartup ?? SHELL_STARTUP)
+    const startup = checkCardStartup(input.defaultStartup ?? CLAUDE_STARTUP)
     if (!startup.ok) return startup
     const workspace: Workspace = {
       id: this.generateId(),
@@ -238,7 +298,8 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
       columns: DEFAULT_COLUMN_NAMES.map((n) => ({ id: this.generateId(), name: n })),
       cards: [],
       nextCardNumber: 1,
-      defaultStartup: startup.value
+      defaultStartup: startup.value,
+      shells: []
     }
     this.set({
       workspaces: [...this.state.workspaces, workspace],
@@ -268,7 +329,7 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
     }
     let defaultStartup = current.defaultStartup
     if (patch.defaultStartup !== undefined) {
-      const checked = checkStartup(patch.defaultStartup)
+      const checked = checkCardStartup(patch.defaultStartup)
       if (!checked.ok) return checked
       defaultStartup = checked.value
     }
@@ -345,20 +406,22 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
     workspaceId: string,
     columnId: string,
     title: string,
-    startup?: StartupCommand
+    startup?: StartupCommand,
+    worktree?: NewCardWorktree
   ): Result<Card> {
     const ws = this.find(workspaceId)
     if (!ws) return unknownWorkspace()
     if (!ws.columns.some((c) => c.id === columnId)) return unknownColumn()
-    const checked = checkStartup(startup ?? ws.defaultStartup)
+    const checked = checkCardStartup(startup ?? ws.defaultStartup)
     if (!checked.ok) return checked
     const trimmed = title.trim()
     const created: Card = {
       id: this.generateId(),
       columnId,
       title: trimmed || `Terminal ${ws.nextCardNumber}`,
-      directory: ws.directory,
+      directory: worktree && ws.host === undefined ? worktree.directory : ws.directory,
       ...(ws.host !== undefined && { host: ws.host }),
+      ...(worktree && ws.host === undefined && { worktree: { ...worktree.worktree } }),
       startup: checked.value,
       agentSessionId: this.generateSessionId(),
       claudeStarted: false,
@@ -414,11 +477,48 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
     return { ok: true, value: undefined }
   }
 
+  createShell(workspaceId: string, input: ShellInput): Result<WorkspaceShell> {
+    const ws = this.find(workspaceId)
+    if (!ws) return unknownWorkspace()
+    const checked = checkShell(input)
+    if (!checked.ok) return checked
+    const shell: WorkspaceShell = { id: this.generateId(), ...checked.value }
+    this.replace({ ...ws, shells: [...ws.shells, shell] })
+    return { ok: true, value: shell }
+  }
+
+  updateShell(workspaceId: string, shellId: string, input: ShellInput): Result<WorkspaceShell> {
+    const ws = this.find(workspaceId)
+    if (!ws) return unknownWorkspace()
+    if (!ws.shells.some((s) => s.id === shellId)) {
+      return { ok: false, error: { field: 'shell', message: 'Shell not found' } }
+    }
+    const checked = checkShell(input)
+    if (!checked.ok) return checked
+    const shell: WorkspaceShell = { id: shellId, ...checked.value }
+    this.replace({ ...ws, shells: ws.shells.map((s) => (s.id === shellId ? shell : s)) })
+    return { ok: true, value: shell }
+  }
+
+  deleteShell(workspaceId: string, shellId: string): Result<void> {
+    const ws = this.find(workspaceId)
+    if (!ws) return unknownWorkspace()
+    this.replace({ ...ws, shells: ws.shells.filter((s) => s.id !== shellId) })
+    return { ok: true, value: undefined }
+  }
+
   setCardStartup(workspaceId: string, cardId: string, startup: StartupCommand): Result<Card> {
-    const checked = checkStartup(startup)
+    const checked = checkCardStartup(startup)
     return this.updateCard(workspaceId, cardId, (card) =>
       checked.ok ? { ok: true, value: { ...card, startup: checked.value } } : checked
     )
+  }
+
+  setAgentSession(workspaceId: string, cardId: string, sessionId: string): Result<Card> {
+    return this.updateCard(workspaceId, cardId, (card) => ({
+      ok: true,
+      value: { ...card, agentSessionId: sessionId, claudeStarted: true }
+    }))
   }
 
   markClaudeStarted(workspaceId: string, cardId: string): Result<Card> {
@@ -523,3 +623,18 @@ const unknownWorkspace = (): { ok: false; error: FieldError } =>
   fail('workspace', 'Workspace not found')
 const unknownColumn = (): { ok: false; error: FieldError } => fail('column', 'Column not found')
 const unknownCard = (): { ok: false; error: FieldError } => fail('card', 'Card not found')
+
+/** A shell's fields, trimmed and checked: a name of 1 to 100 characters, a one-line command or ''. */
+export function checkShell(input: ShellInput): Result<ShellInput> {
+  const name = input.name.trim()
+  if (!name) return { ok: false, error: { field: 'name', message: 'Name is required' } }
+  if (name.length > MAX_SHELL_NAME_LENGTH) {
+    return { ok: false, error: { field: 'name', message: 'Name is too long' } }
+  }
+  const command = input.command.trim()
+  if (command) {
+    const checked = checkStartup({ kind: 'custom', command })
+    if (!checked.ok) return { ok: false, error: { ...checked.error, field: 'command' } }
+  }
+  return { ok: true, value: { name, command, autostart: input.autostart === true } }
+}

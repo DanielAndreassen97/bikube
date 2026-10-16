@@ -307,3 +307,100 @@ describe('agent presets in the saved state (#21 D6)', () => {
     expectRejected(presetFileWith((s) => (s.workspaces[2].cards[0].startup = { kind: 'amp' })))
   })
 })
+
+describe('saved worktree cards', () => {
+  const state = (cardOver: Record<string, unknown>): string =>
+    JSON.stringify({
+      version: 1,
+      state: {
+        activeId: 'w',
+        workspaces: [
+          {
+            id: 'w',
+            name: 'alpha',
+            directory: '/tmp/repo',
+            columns: [{ id: 'c', name: 'Backlog' }],
+            cards: [
+              {
+                id: 'k',
+                columnId: 'c',
+                title: 'fix',
+                directory: '/data/wt/fix',
+                startup: { kind: 'claude' },
+                agentSessionId: '6f1c1b1e-2f0e-4a59-9a43-0d6c4b0f1a11',
+                claudeStarted: false,
+                startedAgents: [],
+                ...cardOver
+              }
+            ],
+            nextCardNumber: 1,
+            defaultStartup: { kind: 'shell' }
+          }
+        ]
+      }
+    })
+  const worktree = { path: '/data/wt/fix', branch: 'drovr/fix', repo: '/tmp/repo' }
+
+  it('keeps a valid worktree, and reads a card without one as before', () => {
+    const parsed = parseSavedState(state({ worktree }))
+    expect(parsed.ok && parsed.value.workspaces[0]!.cards[0]!.worktree).toEqual(worktree)
+    const plain = parseSavedState(state({}))
+    expect(plain.ok && plain.value.workspaces[0]!.cards[0]).not.toHaveProperty('worktree')
+  })
+
+  it('rejects a bad worktree, and one on an SSH card', () => {
+    expect(parseSavedState(state({ worktree: { path: '/x' } })).ok).toBe(false)
+    expect(parseSavedState(state({ worktree, host: 'devbox', directory: '~/api' })).ok).toBe(false)
+  })
+})
+
+describe('shells, and a workspace defaulting to Shell', () => {
+  const file = (workspace: Record<string, unknown>): string =>
+    JSON.stringify({
+      version: 1,
+      state: {
+        activeId: 'w',
+        workspaces: [
+          {
+            id: 'w',
+            name: 'alpha',
+            directory: '/tmp/repo',
+            columns: [{ id: 'c', name: 'Backlog' }],
+            cards: [],
+            nextCardNumber: 1,
+            defaultStartup: { kind: 'shell' },
+            ...workspace
+          }
+        ]
+      }
+    })
+  const card = (id: string, title: string, kind: string): object => ({
+    id,
+    columnId: 'c',
+    title,
+    directory: '/tmp/repo',
+    startup: { kind },
+    agentSessionId: '6f1c1b1e-2f0e-4a59-9a43-0d6c4b0f1a11',
+    claudeStarted: false,
+    startedAgents: []
+  })
+
+  it('keeps every card, adds no shells, and defaults new cards to Claude Code', () => {
+    const parsed = parseSavedState(
+      file({ cards: [card('k1', 'Scratch', 'shell'), card('k2', 'Fix login', 'claude')] })
+    )
+    if (!parsed.ok) throw new Error(parsed.reason)
+    const [w] = parsed.value.workspaces
+    expect(w!.cards.map((c) => c.title)).toEqual(['Scratch', 'Fix login'])
+    expect(w!.shells).toEqual([])
+    expect(w!.defaultStartup).toEqual({ kind: 'claude' })
+  })
+
+  it('reads saved shells, and rejects a bad one', () => {
+    const shells = [{ id: 's1', name: 'Dev server', command: 'npm run dev', autostart: true }]
+    const parsed = parseSavedState(file({ shells }))
+    expect(parsed.ok && parsed.value.workspaces[0]!.shells).toEqual(shells)
+    expect(parseSavedState(file({ shells: [{ id: 's1', name: '' }] })).ok).toBe(false)
+    expect(parseSavedState(file({ shells: 'nope' })).ok).toBe(false)
+  })
+})

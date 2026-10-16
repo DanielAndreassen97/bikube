@@ -66,13 +66,28 @@ export function toSyncBoard(state: WorkspaceState, home: string): SyncBoard {
         title: c.title,
         directory: dir(c.directory, c.host),
         ...(c.host !== undefined && { host: c.host }),
+        // A worktree is on the machine that made it; another machine's card won't find it.
+        ...(c.worktree && {
+          worktree: {
+            path: portableDirectory(c.worktree.path, home),
+            branch: c.worktree.branch,
+            repo: portableDirectory(c.worktree.repo, home)
+          }
+        }),
         startup: startupCopy(c.startup),
         agentSessionId: c.agentSessionId,
         claudeStarted: c.host === undefined ? false : c.claudeStarted,
         startedAgents: c.host === undefined ? [] : [...c.startedAgents]
       })),
       nextCardNumber: w.nextCardNumber,
-      defaultStartup: startupCopy(w.defaultStartup)
+      defaultStartup: startupCopy(w.defaultStartup),
+      // Shells sync like cards: their definitions travel, their processes stay on each machine.
+      shells: w.shells.map((sh) => ({
+        id: sh.id,
+        name: sh.name,
+        command: sh.command,
+        autostart: sh.autostart
+      }))
     }))
   }
 }
@@ -131,7 +146,20 @@ function expandItem(raw: unknown, home: string): unknown {
   if (!isObject(raw)) return raw
   const local = raw.host === undefined || raw.host === null
   if (!local || typeof raw.directory !== 'string') return { ...raw }
-  return { ...raw, directory: expandHome(raw.directory, home) }
+  const worktree = raw.worktree
+  return {
+    ...raw,
+    directory: expandHome(raw.directory, home),
+    ...(isObject(worktree) &&
+      typeof worktree.path === 'string' &&
+      typeof worktree.repo === 'string' && {
+        worktree: {
+          ...worktree,
+          path: expandHome(worktree.path, home),
+          repo: expandHome(worktree.repo, home)
+        }
+      })
+  }
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> =>

@@ -42,6 +42,19 @@ const api: DrovrApi = {
       return () => ipcRenderer.removeListener(IPC.syncBoard, handler)
     }
   },
+  worktree: {
+    info: (dir) => ipcRenderer.invoke(IPC.worktreeInfo, dir),
+    create: (dir, branch) => ipcRenderer.invoke(IPC.worktreeCreate, dir, branch),
+    dirty: (path) => ipcRenderer.invoke(IPC.worktreeDirty, path),
+    remove: (repo, path, force) => ipcRenderer.invoke(IPC.worktreeRemove, repo, path, force)
+  },
+  app: {
+    setBadge: (count) => ipcRenderer.send(IPC.appSetBadge, count),
+    focus: () => ipcRenderer.send(IPC.appFocus),
+    requestAttention: () => ipcRenderer.send(IPC.appRequestAttention),
+    home: () => ipcRenderer.invoke(IPC.appHome),
+    reveal: (path) => ipcRenderer.send(IPC.appReveal, path)
+  },
   terminal: {
     spawn: (cols, rows, cwd, cardId, host = null) =>
       ipcRenderer.invoke(IPC.spawn, cols, rows, cwd, cardId, host),

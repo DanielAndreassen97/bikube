@@ -5,7 +5,15 @@
 import { isAgentKind, type AgentKind } from './agent-presets'
 import { checkHost, checkRemoteDirectory } from './ssh-location'
 import { checkStartup, type StartupCommand } from './startup-command'
-import type { Card, Column, Workspace, WorkspaceState } from './workspace-store'
+import {
+  checkShell,
+  type Card,
+  type CardWorktree,
+  type Column,
+  type Workspace,
+  type WorkspaceShell,
+  type WorkspaceState
+} from './workspace-store'
 
 export const STATE_FILE_NAME = 'drovr-state.json'
 export const SAVED_STATE_VERSION = 1
@@ -73,14 +81,18 @@ function readWorkspace(raw: unknown): Workspace | string {
   if (typeof host !== 'object') return host
   if (!Number.isInteger(nextCardNumber) || (nextCardNumber as number) < 1)
     return 'bad nextCardNumber'
-  const defaultStartup = readStartup(raw.defaultStartup)
-  if (!defaultStartup) return 'bad default startup command'
+  const startup = readStartup(raw.defaultStartup)
+  if (!startup) return 'bad default startup command'
+  // Cards are agent sessions now: a workspace defaulting to a plain shell defaults to Claude Code.
+  const defaultStartup: StartupCommand = startup.kind === 'shell' ? { kind: 'claude' } : startup
   if (!Array.isArray(raw.columns) || raw.columns.length === 0) return 'bad columns'
   const columns: Column[] = []
   for (const c of raw.columns) {
     if (!isObject(c) || !isId(c.id) || !isText(c.name)) return 'bad column'
     columns.push({ id: c.id, name: c.name })
   }
+  const shells = readShells(raw.shells)
+  if (typeof shells === 'string') return shells
   if (!Array.isArray(raw.cards)) return 'bad cards'
   const cards: Card[] = []
   for (const c of raw.cards) {
@@ -97,8 +109,28 @@ function readWorkspace(raw: unknown): Workspace | string {
     columns,
     cards,
     nextCardNumber: nextCardNumber as number,
-    defaultStartup
+    defaultStartup,
+    shells
   }
+}
+
+/** The workspace's shells; missing, as in files from before shells, is none. */
+function readShells(raw: unknown): WorkspaceShell[] | string {
+  if (raw === undefined) return []
+  if (!Array.isArray(raw)) return 'bad shells'
+  const shells: WorkspaceShell[] = []
+  for (const s of raw) {
+    if (!isObject(s) || !isId(s.id) || typeof s.name !== 'string') return 'bad shell'
+    const checked = checkShell({
+      name: s.name,
+      command: typeof s.command === 'string' ? s.command : '',
+      autostart: s.autostart === true
+    })
+    if (!checked.ok || checked.value.name !== s.name) return 'bad shell'
+    if (shells.some((other) => other.id === s.id)) return 'duplicate shell'
+    shells.push({ id: s.id, ...checked.value })
+  }
+  return shells
 }
 
 /** The card, or why it is rejected. */
@@ -113,17 +145,32 @@ function readCard(raw: unknown): Card | string {
   if (!startup) return 'bad startup command'
   const startedAgents = readStartedAgents(raw.startedAgents)
   if (!startedAgents) return 'bad started agents'
+  const worktree = readWorktree(raw.worktree, host.host)
+  if (typeof worktree !== 'object') return worktree
   return {
     id,
     columnId,
     title,
     directory,
     ...host,
+    ...worktree,
     startup,
     agentSessionId,
     claudeStarted,
     startedAgents
   }
+}
+
+/** `{}` without a worktree; `{ worktree }` for a local card's valid one; else why it is rejected. */
+function readWorktree(
+  raw: unknown,
+  host: string | undefined
+): { worktree?: CardWorktree } | string {
+  if (raw === undefined || raw === null) return {}
+  if (!isObject(raw) || host !== undefined) return 'bad worktree'
+  const { path, branch, repo } = raw
+  if (!isText(path) || !isText(branch) || !isText(repo)) return 'bad worktree'
+  return { worktree: { path, branch, repo } }
 }
 
 /** Distinct preset kinds (#21 D6); missing, as in files from before #21, is none. Null otherwise. */

@@ -36,7 +36,8 @@ function workspace(id: string, name: string, over: Partial<Workspace> = {}): Wor
     ],
     cards: [],
     nextCardNumber: 2,
-    defaultStartup: { kind: 'shell' },
+    defaultStartup: { kind: 'claude' },
+    shells: [],
     ...over
   }
 }
@@ -131,6 +132,7 @@ describe('the board written to the sync file (#13 D2, D3, D5, D6, AC1, AC5)', ()
 
   it('writes the same text for the same board whatever the key order in memory', () => {
     const reordered: Workspace = {
+      shells: api.shells,
       defaultStartup: api.defaultStartup,
       nextCardNumber: api.nextCardNumber,
       cards: api.cards.map((c) => ({
@@ -279,5 +281,27 @@ describe('joining the boards when sync is turned on (#13 D9, AC3)', () => {
   it("is this machine's board when the file's is empty", () => {
     const localWeb = workspace('web', 'web')
     expect(joinBoards([], [localWeb])).toEqual([localWeb])
+  })
+})
+
+describe('worktree cards in the sync file', () => {
+  it('writes the worktree with home as ~ and reads it back expanded', () => {
+    const worktree = { path: `${HOME}/wt/fix`, branch: 'drovr/fix', repo: `${HOME}/proj` }
+    const state: WorkspaceState = {
+      activeId: 'w',
+      workspaces: [
+        workspace('w', 'alpha', {
+          cards: [card('k', 'w-backlog', { directory: `${HOME}/wt/fix`, worktree })]
+        })
+      ]
+    }
+    const board = toSyncBoard(state, HOME)
+    expect(board.workspaces[0]!.cards[0]!.worktree).toEqual({
+      path: '~/wt/fix',
+      branch: 'drovr/fix',
+      repo: '~/proj'
+    })
+    const read = parseSyncFile(serializeSyncFile(board, new Date(0)), HOME)
+    expect(read.ok && read.workspaces[0]!.cards[0]!.worktree).toEqual(worktree)
   })
 })

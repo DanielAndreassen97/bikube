@@ -1,6 +1,7 @@
 import type { BoardCommand } from '../core/board-args'
 import type { BoardReply } from '../core/board-protocol'
 import type { GhosttyTheme } from '../core/ghostty-config'
+import type { CreateResult } from '../core/worktrees'
 import type { Settings } from '../core/settings'
 import type { SyncStatus } from '../core/sync-status'
 import type { Workspace, WorkspaceState } from '../core/workspace-store'
@@ -30,7 +31,16 @@ export const IPC = {
   syncStatusChanged: 'sync:statusChanged',
   syncSetFolder: 'sync:setFolder',
   syncPickFolder: 'sync:pickFolder',
-  syncBoard: 'sync:board'
+  syncBoard: 'sync:board',
+  appSetBadge: 'app:setBadge',
+  appFocus: 'app:focus',
+  appRequestAttention: 'app:requestAttention',
+  appHome: 'app:home',
+  appReveal: 'app:reveal',
+  worktreeInfo: 'worktree:info',
+  worktreeCreate: 'worktree:create',
+  worktreeDirty: 'worktree:dirty',
+  worktreeRemove: 'worktree:remove'
 } as const
 
 export interface TerminalExit {
@@ -163,6 +173,47 @@ export interface SyncApi {
   onBoard(listener: (workspaces: Workspace[]) => void): () => void
 }
 
+/** A local folder's git repository, for offering a card its own worktree. */
+export interface WorktreeInfo {
+  /** The checked-out branch; null on a detached HEAD. */
+  branch: string | null
+  /** Every local branch, so a new card's branch name is free. */
+  branches: string[]
+}
+
+/** Cards' own git worktrees, made and removed by main in `<userData>/worktrees`. */
+export interface WorktreeApi {
+  /** The repository `dir` is in, or null when it isn't in one (or git is missing). */
+  info(dir: string): Promise<WorktreeInfo | null>
+  /**
+   * Makes a worktree on the new `branch` from the repository's HEAD, with its git-ignored files
+   * copied in; the result gives the card's directory inside it.
+   */
+  create(dir: string, branch: string): Promise<CreateResult>
+  /** Whether the worktree has uncommitted changes; null when it can't tell. */
+  dirty(path: string): Promise<boolean | null>
+  /** Removes the worktree (its branch stays); `force` even with uncommitted changes. */
+  remove(
+    repo: string,
+    path: string,
+    force: boolean
+  ): Promise<{ ok: true } | { ok: false; reason: string }>
+}
+
+/** The app's place on the desktop, for notifications. */
+export interface AppApi {
+  /** The Dock (or launcher) badge: how many cards wait for the user; 0 clears it. */
+  setBadge(count: number): void
+  /** Brings this window forward, e.g. when a notification is clicked. */
+  focus(): void
+  /** While the window isn't focused: a Dock bounce on macOS, a flashing taskbar entry elsewhere. */
+  requestAttention(): void
+  /** The user's home folder, for showing paths with `~`. */
+  home(): Promise<string>
+  /** Opens a local folder in Finder or the file manager; anything but an existing folder is ignored. */
+  reveal(path: string): void
+}
+
 /** The typed surface the preload script exposes to the renderer as `window.drovr`. Grows with each feature. */
 export interface DrovrApi {
   platform: NodeJS.Platform
@@ -174,4 +225,6 @@ export interface DrovrApi {
   settings: SettingsApi
   board: BoardApi
   sync: SyncApi
+  app: AppApi
+  worktree: WorktreeApi
 }
