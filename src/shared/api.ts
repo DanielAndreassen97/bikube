@@ -1,6 +1,7 @@
 import type { BoardCommand } from '../core/board-args'
 import type { BoardReply } from '../core/board-protocol'
 import type { GhosttyTheme } from '../core/ghostty-config'
+import type { AheadBehind, BranchList, GitResult, NewBranchResult, SyncResult } from '../core/git'
 import type { CreateResult } from '../core/worktrees'
 import type { Settings } from '../core/settings'
 import type { SyncStatus } from '../core/sync-status'
@@ -42,6 +43,14 @@ export const IPC = {
   worktreeCreate: 'worktree:create',
   worktreeDirty: 'worktree:dirty',
   worktreeRemove: 'worktree:remove',
+  gitBranches: 'git:branches',
+  gitSwitch: 'git:switch',
+  gitTrack: 'git:track',
+  gitCreate: 'git:create',
+  gitAheadBehind: 'git:aheadBehind',
+  gitFetch: 'git:fetch',
+  gitPull: 'git:pull',
+  gitPush: 'git:push',
   updateState: 'update:state',
   updateStateChanged: 'update:stateChanged',
   updateShow: 'update:show',
@@ -209,6 +218,32 @@ export interface WorktreeApi {
   ): Promise<{ ok: true } | { ok: false; reason: string }>
 }
 
+/**
+ * The title bar's branch menu (#33), run by main in a local folder inside a git repository: never
+ * prompts, never through a shell (D12, D15).
+ */
+export interface GitApi {
+  /** The branches of the repository `dir` is in; null outside one. */
+  branches(dir: string): Promise<BranchList | null>
+  /** Switches to the local `branch`; git's message when it refuses (D4, D6). */
+  switch(dir: string, branch: string): Promise<GitResult>
+  /** Switches to `remote`'s `branch`: its local branch, else a new one tracking it (D5). */
+  track(dir: string, remote: string, branch: string): Promise<GitResult>
+  /**
+   * Creates `name` at HEAD and switches to it (D7); an empty, invalid or taken name runs nothing
+   * and comes back with `name` set.
+   */
+  create(dir: string, name: string): Promise<NewBranchResult>
+  /** The current branch's `↑ahead ↓behind` against its upstream as of the last fetch; null without one (D10). */
+  aheadBehind(dir: string): Promise<AheadBehind | null>
+  /** `git fetch --all --prune`: `Fetched`, else git's message (D8). */
+  fetch(dir: string): Promise<SyncResult>
+  /** `git pull --ff-only`: `Pulled` or `Already up to date`, else git's refusal (D9). */
+  pull(dir: string): Promise<SyncResult>
+  /** Pushes the current branch, to `origin` as its upstream when it has none: `Pushed` (D9). */
+  push(dir: string): Promise<SyncResult>
+}
+
 /** The app's place on the desktop, for notifications. */
 export interface AppApi {
   /** The Dock (or launcher) badge: how many cards wait for the user; 0 clears it. */
@@ -260,5 +295,6 @@ export interface DrovrApi {
   sync: SyncApi
   app: AppApi
   worktree: WorktreeApi
+  git: GitApi
   update: UpdateApi
 }
