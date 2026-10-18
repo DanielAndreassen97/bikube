@@ -10,6 +10,9 @@ import { pipeline } from 'node:stream/promises'
 import { IPC } from '../shared/api'
 import {
   CHECK_INTERVAL_MS,
+  WAITING_CHECK_MS,
+  WAITING_CHECKS,
+  WaitingRechecks,
   INSTALL_SCRIPT,
   installPaths,
   installTarget,
@@ -33,16 +36,27 @@ export interface MainUpdates {
 
 /**
  * Only a development build honours these, so smoke tests can drive the updater with a local feed:
- * the release JSON's URL, the version to compare with, and the file or folder an install
- * replaces. A packaged app always checks GitHub with its own version and location.
+ * the release JSON's URL, the version to compare with, the file or folder an install replaces,
+ * and how soon and how often a release whose file isn't up yet is checked again. A packaged app
+ * always checks GitHub with its own version and location.
  */
-function testOverrides(): { feed: string; current: string; target: string | null } | null {
+function testOverrides(): {
+  feed: string
+  current: string
+  target: string | null
+  waitingMs: number | null
+  waitingChecks: number | null
+} | null {
   const feed = process.env['DROVR_UPDATE_FEED']
   if (app.isPackaged || !feed) return null
+  const waitingMs = Number(process.env['DROVR_UPDATE_WAITING_MS'])
+  const waitingChecks = Number(process.env['DROVR_UPDATE_WAITING_CHECKS'])
   return {
     feed,
     current: process.env['DROVR_UPDATE_CURRENT'] ?? '0.0.0',
-    target: process.env['DROVR_UPDATE_TARGET'] || null
+    target: process.env['DROVR_UPDATE_TARGET'] || null,
+    waitingMs: Number.isInteger(waitingMs) && waitingMs > 0 ? waitingMs : null,
+    waitingChecks: Number.isInteger(waitingChecks) && waitingChecks > 0 ? waitingChecks : null
   }
 }
 
@@ -85,6 +99,7 @@ export function registerUpdates(runningTerminals: () => number): MainUpdates {
   const enabled = app.isPackaged || test !== null
   const current = test?.current ?? app.getVersion()
   const feed = test?.feed ?? LATEST_RELEASE_URL
+  const waitingCheckMs = test?.waitingMs ?? WAITING_CHECK_MS
   const base = test ? new URL('/', test.feed).toString() : RELEASES_URL
   const target = test
     ? test.target && {
@@ -125,7 +140,7 @@ export function registerUpdates(runningTerminals: () => number): MainUpdates {
 
   /** How this install takes `release`: by itself where it can write its own app, else by hand. */
   async function installKind(release: Release): Promise<InstallKind> {
-    if (!target || !release.asset) return 'manual'
+    if (!target || (!release.asset && !release.waiting)) return 'manual'
     try {
       // `access` alone: a standard account owns its `Drovr.app` but can't write `/Applications`.
       for (const path of installPaths(target.kind, '', target.path).writable)
@@ -175,8 +190,28 @@ export function registerUpdates(runningTerminals: () => number): MainUpdates {
       publish({ kind: 'available', release, install, progress: 0, skipped, error })
       return
     }
+    if (release.waiting) {
+      // A check the user asks for gives the version its rechecks again.
+      const rechecking = !skipped && checkSoon(release.version, manual)
+      publish({ kind: 'available', release, install, progress: 0, skipped, rechecking })
+      return
+    }
     publish({ kind: 'available', release, install, progress: ready ? 1 : 0, skipped })
     if (!skipped && install !== 'manual' && !ready) void download(release, install)
+  }
+
+  /** Checks again soon for `version`, whose file isn't up yet, when it has rechecks left; whether it will. */
+  const rechecks = new WaitingRechecks(test?.waitingChecks ?? WAITING_CHECKS)
+  let waitingTimer: NodeJS.Timeout | null = null
+  function checkSoon(version: string, asked: boolean): boolean {
+    if (waitingTimer) return true
+    if (!rechecks.take(version, asked)) return false
+    waitingTimer = setTimeout(() => {
+      waitingTimer = null
+      void check(false)
+    }, waitingCheckMs)
+    waitingTimer.unref()
+    return true
   }
 
   async function download(release: Release, kind: 'mac' | 'appimage'): Promise<void> {
@@ -277,6 +312,8 @@ export function registerUpdates(runningTerminals: () => number): MainUpdates {
   ipcMain.on(IPC.updateInstall, (event) => {
     if (!fromMainFrame(event) || state.kind !== 'available') return
     const { release, install } = state
+    // Its file isn't up yet: nothing to download or link to until a check finds it.
+    if (release.waiting) return
     if (install === 'manual' || state.error) {
       void shell.openExternal(release.pageUrl)
       return

@@ -12,6 +12,36 @@ export const RELEASES_URL = `https://github.com/${REPOSITORY}/releases/`
 /** Checked at launch and then this often. */
 export const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000
 
+/**
+ * A release found before its files are up (the release workflow takes about 10 minutes to build
+ * and attach them) is checked again this often, at most `WAITING_CHECKS` times.
+ */
+export const WAITING_CHECK_MS = 2 * 60 * 1000
+export const WAITING_CHECKS = 30
+
+/**
+ * Counts the rechecks of a release whose file isn't up yet, per version: a release whose file
+ * never came (one platform's build failed) doesn't use up the next one's. A check the user asks
+ * for gives the version its rechecks again.
+ */
+export class WaitingRechecks {
+  private version: string | null = null
+  private used = 0
+
+  constructor(private readonly limit: number = WAITING_CHECKS) {}
+
+  /** Whether to check `version` again soon, counting that recheck when so. */
+  take(version: string, asked: boolean): boolean {
+    if (version !== this.version || asked) {
+      this.version = version
+      this.used = 0
+    }
+    if (this.used >= this.limit) return false
+    this.used++
+    return true
+  }
+}
+
 /** Largest release file Drovr downloads (the macOS zip is about 110 MB). */
 export const MAX_ASSET_BYTES = 500 * 1024 * 1024
 
@@ -41,6 +71,11 @@ export interface Release {
   pageUrl: string
   /** This platform's file; null when the release has none (then it can only be downloaded). */
   asset: ReleaseAsset | null
+  /**
+   * This platform's file isn't up yet: missing, still uploading, or without its checksum. A
+   * newly published release is in this state until its build attaches the files.
+   */
+  waiting: boolean
 }
 
 const VERSION = /^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/
@@ -100,10 +135,15 @@ export function newerRelease(
   const wanted = assetName(version, opts.platform, opts.arch)
   const assets = Array.isArray(r['assets']) ? (r['assets'] as unknown[]) : []
   let asset: ReleaseAsset | null = null
+  let waiting = wanted !== null
   for (const a of assets) {
     if (typeof a !== 'object' || a === null) continue
     const f = a as Record<string, unknown>
     if (wanted === null || f['name'] !== wanted) continue
+    // GitHub lists a file while it uploads, and gives its digest once it has it all.
+    if (f['state'] !== undefined && f['state'] !== 'uploaded') continue
+    if (f['digest'] === undefined || f['digest'] === null) continue
+    waiting = false
     const url = f['browser_download_url']
     const size = f['size']
     const digest = typeof f['digest'] === 'string' ? SHA256.exec(f['digest']) : null
@@ -112,7 +152,7 @@ export function newerRelease(
     if (size > MAX_ASSET_BYTES || !digest) continue
     asset = { name: wanted, url, size, sha256: digest[1]!.toLowerCase() }
   }
-  return { version, publishedAt, pageUrl, asset }
+  return { version, publishedAt, pageUrl, asset, waiting }
 }
 
 /**
@@ -207,6 +247,8 @@ export type UpdateState =
       skipped: boolean
       /** Downloading or preparing failed; Install falls back to the release page. */
       error?: string
+      /** The release's file isn't up yet and Drovr will check again soon by itself. */
+      rechecking?: boolean
     }
 
 /** Bytes as the popup shows them: `77.7 MB`. */

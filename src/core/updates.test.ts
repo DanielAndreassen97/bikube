@@ -23,7 +23,8 @@ import {
   MAX_ASSET_BYTES,
   newerRelease,
   parseVersion,
-  RELEASES_URL
+  RELEASES_URL,
+  WaitingRechecks
 } from './updates'
 
 const DIGEST = 'a'.repeat(64)
@@ -100,7 +101,26 @@ describe('the latest release', () => {
         url: `${RELEASES_URL}download/v0.3.0/drovr-0.3.0-arm64-mac.zip`,
         size: 81_474_355,
         sha256: DIGEST
-      }
+      },
+      waiting: false
+    })
+  })
+
+  it('waits for this platform’s file while it is missing, uploading or without its checksum', () => {
+    const waiting = (asset: Record<string, unknown>): unknown => {
+      const r = newerRelease(release({}, asset), MAC)
+      return { asset: r?.asset, waiting: r?.waiting }
+    }
+    expect(waiting({ name: 'something-else.zip' })).toEqual({ asset: null, waiting: true })
+    expect(waiting({ state: 'starter' })).toEqual({ asset: null, waiting: true })
+    expect(waiting({ digest: null })).toEqual({ asset: null, waiting: true })
+    expect(waiting({ digest: undefined })).toEqual({ asset: null, waiting: true })
+    expect(waiting({ state: 'uploaded' })).toMatchObject({ waiting: false })
+    expect(newerRelease(release({ assets: [] }), MAC)?.waiting).toBe(true)
+    // A platform with no file of its own never waits: it can only download from the page.
+    expect(newerRelease(release(), { ...MAC, arch: 'x64' })).toMatchObject({
+      asset: null,
+      waiting: false
     })
   })
 
@@ -129,8 +149,8 @@ describe('the latest release', () => {
       newerRelease(release({}, asset), MAC)?.asset
     expect(newerRelease(release(), { ...MAC, platform: 'linux', arch: 'x64' })?.asset).toBeNull()
     expect(fileOf({ browser_download_url: 'https://evil.example/drovr.zip' })).toBeNull()
-    expect(fileOf({ digest: undefined })).toBeNull()
     expect(fileOf({ digest: 'md5:abc' })).toBeNull()
+    expect(newerRelease(release({}, { digest: 'md5:abc' }), MAC)?.waiting).toBe(false)
     expect(fileOf({ size: 0 })).toBeNull()
     expect(fileOf({ size: MAX_ASSET_BYTES + 1 })).toBeNull()
   })
@@ -142,6 +162,33 @@ describe('the latest release', () => {
       { ...MAC, base }
     )
     expect(r?.asset?.url).toBe(`${base}f.zip`)
+  })
+})
+
+describe('rechecks of a release whose file isn’t up yet', () => {
+  it('stops after the limit, until the user asks', () => {
+    const rechecks = new WaitingRechecks(2)
+    expect(rechecks.take('0.3.0', false)).toBe(true)
+    expect(rechecks.take('0.3.0', false)).toBe(true)
+    expect(rechecks.take('0.3.0', false)).toBe(false)
+    expect(rechecks.take('0.3.0', true)).toBe(true)
+  })
+
+  it('counts per version: one whose file never came leaves the next its own', () => {
+    const rechecks = new WaitingRechecks(2)
+    rechecks.take('0.3.0', false)
+    rechecks.take('0.3.0', false)
+    expect(rechecks.take('0.3.0', false)).toBe(false)
+    // Found by a background check, not one the user asked for.
+    expect(rechecks.take('0.3.1', false)).toBe(true)
+    expect(rechecks.take('0.3.1', false)).toBe(true)
+    expect(rechecks.take('0.3.1', false)).toBe(false)
+  })
+
+  it('allows 30 by default, an hour at 2 minutes', () => {
+    const rechecks = new WaitingRechecks()
+    for (let i = 0; i < 30; i++) expect(rechecks.take('1.0.0', false)).toBe(true)
+    expect(rechecks.take('1.0.0', false)).toBe(false)
   })
 })
 
