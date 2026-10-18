@@ -6,7 +6,8 @@ import { expectCardOpen } from './card-view'
 import { launchApp, removeDataDirs } from './launch'
 import { plainCards } from './plain-cards'
 
-// Colours, copy and paste in a card's terminal (#19: #1 AC6 and AC7 ported to the board).
+// Colours, copy and paste in a card's terminal (#19: #1 AC6 and AC7 ported to the board), then
+// clickable links (not specced: the terminal polish pass); Shift+Enter is in shift-enter.spec.ts.
 // Linux runs drive Ctrl+Shift+C/V; Cmd+C/V on macOS is checked by hand.
 
 let app: ElectronApplication
@@ -224,4 +225,91 @@ test('AC3: paste with a newline reaches the shell', async () => {
       return lines.includes('pasteA') && lines.includes('pasteB')
     })
     .toBe(true)
+})
+
+/** Replaces `shell.openExternal` in main with a recorder, so no browser opens. */
+async function recordOpenedLinks(): Promise<() => Promise<string[]>> {
+  await app.evaluate(({ shell }) => {
+    const opened: string[] = []
+    ;(globalThis as { openedLinks?: string[] }).openedLinks = opened
+    shell.openExternal = async (url: string) => {
+      opened.push(url)
+    }
+  })
+  return () =>
+    app.evaluate(() => [...((globalThis as { openedLinks?: string[] }).openedLinks ?? [])])
+}
+
+/** The middle of `text` on the open card's screen, in page coordinates. */
+function screenPoint(text: string): Promise<{ x: number; y: number }> {
+  return page.evaluate(
+    ([sel, t]) => {
+      const host = document.querySelector(sel) as HTMLElement & {
+        __xterm: {
+          cols: number
+          rows: number
+          buffer: {
+            active: {
+              viewportY: number
+              length: number
+              getLine(i: number): { translateToString(trim: boolean): string } | undefined
+            }
+          }
+        }
+      }
+      const term = host.__xterm
+      const buf = term.buffer.active
+      const box = host.querySelector('.xterm-screen')!.getBoundingClientRect()
+      for (let y = buf.viewportY; y < buf.viewportY + term.rows; y++) {
+        const line = buf.getLine(y)?.translateToString(true) ?? ''
+        const col = line.indexOf(t)
+        if (col < 0) continue
+        const cellW = box.width / term.cols
+        const cellH = box.height / term.rows
+        return {
+          x: box.left + (col + t.length / 2) * cellW,
+          y: box.top + (y - buf.viewportY + 0.5) * cellH
+        }
+      }
+      throw new Error(`${t} is not on screen`)
+    },
+    [TERMINAL, text] as const
+  )
+}
+
+const linkModifier = process.platform === 'darwin' ? 'Meta' : 'Control'
+
+/** Hovers `text` (the link providers act on hover), then clicks it, with the link modifier or not. */
+async function clickText(text: string, withModifier: boolean): Promise<void> {
+  const { x, y } = await screenPoint(text)
+  await page.mouse.move(x - 5, y)
+  await page.mouse.move(x, y)
+  if (withModifier) await page.keyboard.down(linkModifier)
+  await page.mouse.click(x, y)
+  if (withModifier) await page.keyboard.up(linkModifier)
+}
+
+test('a URL in the output opens in the browser on Mod+click, not on a plain click', async () => {
+  const opened = await recordOpenedLinks()
+  await printToTerm('\r\nLocal:   http://localhost:5173/app\r\n')
+  await clickText('localhost:5173', false)
+  await page.waitForTimeout(300)
+  expect(await opened()).toEqual([])
+  await expect
+    .poll(async () => {
+      await clickText('localhost:5173', true)
+      return opened()
+    })
+    .toContain('http://localhost:5173/app')
+})
+
+test('an OSC 8 link opens its target on Mod+click', async () => {
+  const opened = await recordOpenedLinks()
+  await printToTerm('\r\nsee \x1b]8;;https://example.com/docs\x07the docs\x1b]8;;\x07 here\r\n')
+  await expect
+    .poll(async () => {
+      await clickText('the docs', true)
+      return opened()
+    })
+    .toContain('https://example.com/docs')
 })
