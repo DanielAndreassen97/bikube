@@ -472,3 +472,77 @@ describe('terminal and notification preferences in the settings file', () => {
     expect(validateSettings(base, 'linux')).toMatchObject(PREFERENCE_DEFAULTS)
   })
 })
+
+describe('the side panel preferences (#55 D3, D4)', () => {
+  const file = (settings: unknown): string => JSON.stringify({ version: 1, settings })
+  const base: Settings = { theme: 'dark', fontSize: 13, fontFamily: 'Menlo', ...NEW_FIELDS }
+
+  it('shows the panel 280 px wide by default, and writes neither while default', () => {
+    expect(DEFAULT_SETTINGS.sidePanelOpen).toBe(true)
+    expect(DEFAULT_SETTINGS.sidePanelWidth).toBe(280)
+    const written = JSON.parse(serializeSettings(base)).settings
+    expect(written).not.toHaveProperty('sidePanelOpen')
+    expect(written).not.toHaveProperty('sidePanelWidth')
+  })
+
+  it('writes a hidden panel and another width, and reads them back', () => {
+    const settings = { ...base, sidePanelOpen: false, sidePanelWidth: 400 }
+    const text = serializeSettings(settings)
+    expect(JSON.parse(text).settings).toMatchObject({ sidePanelOpen: false, sidePanelWidth: 400 })
+    const parsed = parseSettingsFile(text, 'linux')
+    expect(parsed.settings).toEqual(settings)
+    expect(parsed.replaced).toEqual([])
+  })
+
+  it('takes widths from 200 to 4000 whole pixels and reports any other value', () => {
+    for (const sidePanelWidth of [200, 4000]) {
+      expect(validateSettings({ ...base, sidePanelWidth }, 'linux')?.sidePanelWidth).toBe(
+        sidePanelWidth
+      )
+    }
+    for (const sidePanelWidth of [199, 4001, 280.5, '280']) {
+      expect(validateSettings({ ...base, sidePanelWidth }, 'linux')).toBeNull()
+    }
+    const parsed = parseSettingsFile(
+      file({ ...base, sidePanelWidth: 100, sidePanelOpen: 'no' }),
+      'linux'
+    )
+    expect(parsed.settings).toMatchObject({ sidePanelOpen: true, sidePanelWidth: 280 })
+    expect(parsed.replaced).toEqual(['sidePanelOpen', 'sidePanelWidth'])
+  })
+})
+
+describe('the editor preferences (#55 D14)', () => {
+  const file = (settings: unknown): string => JSON.stringify({ version: 1, settings })
+  const base: Settings = { theme: 'dark', fontSize: 13, fontFamily: 'Menlo', ...NEW_FIELDS }
+
+  it('opens files with VS Code by default, and writes neither field while default', () => {
+    expect(DEFAULT_SETTINGS.editor).toBe('vscode')
+    expect(DEFAULT_SETTINGS.editorCommand).toBe('')
+    const written = JSON.parse(serializeSettings(base)).settings
+    expect(written).not.toHaveProperty('editor')
+    expect(written).not.toHaveProperty('editorCommand')
+  })
+
+  it('writes a custom command and reads it back', () => {
+    const settings: Settings = { ...base, editor: 'custom', editorCommand: 'fake-editor --wait' }
+    const text = serializeSettings(settings)
+    expect(JSON.parse(text).settings).toMatchObject({
+      editor: 'custom',
+      editorCommand: 'fake-editor --wait'
+    })
+    expect(parseSettingsFile(text, 'linux')).toEqual({ settings, replaced: [] })
+  })
+
+  it('takes each editor and a one-line command, and reads any other value as the default', () => {
+    for (const editor of ['vscode', 'cursor', 'zed', 'system', 'custom']) {
+      expect(validateSettings({ ...base, editor }, 'linux')?.editor).toBe(editor)
+    }
+    for (const editorCommand of ['two\nlines', 'x'.repeat(4097), 3]) {
+      expect(validateSettings({ ...base, editorCommand }, 'linux')).toBeNull()
+    }
+    const parsed = parseSettingsFile(file({ ...base, editor: 'vim', editorCommand: 7 }), 'linux')
+    expect(parsed.settings).toMatchObject({ editor: 'vscode', editorCommand: '' })
+    expect(parsed.replaced).toEqual(['editor', 'editorCommand'])
+  })
+})

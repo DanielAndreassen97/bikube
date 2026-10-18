@@ -22,6 +22,8 @@ export interface GitOutput {
   stderr: string
   /** Killed at `timeoutMs`. */
   timedOut?: boolean
+  /** stdout went past `OUTPUT_MAX`: `stdout` is only its start, possibly cut mid-record. */
+  truncated?: boolean
 }
 
 /** Runs `git` with the call's arguments; never throws. */
@@ -53,6 +55,7 @@ export function spawnRunner(spawn: typeof nodeSpawn, platform: NodeJS.Platform):
       let stdout = ''
       let stderr = ''
       let timedOut = false
+      let truncated = false
       let settled = false
       const finish = (output: GitOutput): void => {
         if (settled) return
@@ -72,15 +75,17 @@ export function spawnRunner(spawn: typeof nodeSpawn, platform: NodeJS.Platform):
       child.stdout?.setEncoding('utf8')
       child.stderr?.setEncoding('utf8')
       child.stdout?.on('data', (chunk: string) => {
-        if (stdout.length < OUTPUT_MAX) stdout += chunk
+        const room = OUTPUT_MAX - stdout.length
+        if (chunk.length > room) truncated = true
+        if (room > 0) stdout += chunk.slice(0, room)
       })
       child.stderr?.on('data', (chunk: string) => {
         if (stderr.length < OUTPUT_MAX) stderr += chunk
       })
       child.on('error', (error) =>
-        finish({ code: 1, stdout, stderr: stderr || error.message, timedOut })
+        finish({ code: 1, stdout, stderr: stderr || error.message, timedOut, truncated })
       )
-      child.on('close', (code) => finish({ code: code ?? 1, stdout, stderr, timedOut }))
+      child.on('close', (code) => finish({ code: code ?? 1, stdout, stderr, timedOut, truncated }))
     })
 }
 
@@ -135,6 +140,23 @@ export function gitIn(runner: GitRunner, base: Record<string, string | undefined
     const sshCommand = config.code === 0 ? config.stdout.trim() || null : null
     return call(cwd, args, sshCommand ? gitEnv(base, sshCommand) : plain)
   }
+}
+
+/**
+ * A `Git` for read-only local commands (#55 D16: `status`, `check-ignore`, `rev-parse`) over
+ * `runner`, with the no-prompt environment from `base`: every command gets
+ * `--no-optional-locks`, so a polled read never takes the index lock a running agent's git
+ * needs. Unlike `gitIn` it never reads `core.sshCommand` first: these commands reach no remote.
+ */
+export function readOnlyGit(runner: GitRunner, base: Record<string, string | undefined> = {}): Git {
+  const env = gitEnv(base)
+  return (cwd, args) =>
+    runner({
+      args: ['--no-optional-locks', ...args],
+      cwd,
+      env,
+      timeoutMs: GIT_TIMEOUT_MS
+    })
 }
 
 export interface RemoteBranches {

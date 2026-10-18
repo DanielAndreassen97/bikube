@@ -1,6 +1,9 @@
 import type { BoardCommand } from '../core/board-args'
 import type { BoardReply } from '../core/board-protocol'
 import type { GhosttyTheme } from '../core/ghostty-config'
+import type { OpenResult } from '../core/open-result'
+import type { FolderListing } from '../core/file-tree'
+import type { FolderStatus } from '../core/git-status'
 import type { AheadBehind, BranchList, GitResult, NewBranchResult, SyncResult } from '../core/git'
 import type { CreateResult } from '../core/worktrees'
 import type { Settings } from '../core/settings'
@@ -52,6 +55,9 @@ export const IPC = {
   gitFetch: 'git:fetch',
   gitPull: 'git:pull',
   gitPush: 'git:push',
+  filesList: 'files:list',
+  filesStatus: 'files:status',
+  filesOpen: 'files:open',
   updateState: 'update:state',
   updateStateChanged: 'update:stateChanged',
   updateShow: 'update:show',
@@ -250,6 +256,29 @@ export interface GitApi {
   push(dir: string): Promise<SyncResult>
 }
 
+/**
+ * The side panel's Files tab (#55 D16), read by main inside the shown folder (an absolute,
+ * existing folder): anything that resolves outside it is refused with `ok: false`.
+ */
+export interface FilesApi {
+  /**
+   * The entries of the folder `path` (relative, `/`-separated, `''` for the shown folder itself)
+   * inside `folder`: folders first, the first 2,000, ignored ones marked (D7, D8, D9).
+   */
+  list(folder: string, path: string): Promise<FolderListing>
+  /**
+   * What git sees as changed inside `folder` (D10): one letter per path (relative to `folder`),
+   * renames with their old path; `not-repository` outside a work tree.
+   */
+  status(folder: string): Promise<FolderStatus>
+  /**
+   * Opens the file `path` (relative to `folder`) with the editor setting (D13, D14): `refused`
+   * when it isn't a file inside `folder`, `no-command` for an empty custom command, `failed` with
+   * the reason when the editor couldn't be started.
+   */
+  open(folder: string, path: string): Promise<OpenResult>
+}
+
 /** The app's place on the desktop, for notifications. */
 export interface AppApi {
   /** The Dock (or launcher) badge: how many cards wait for the user; 0 clears it. */
@@ -303,5 +332,6 @@ export interface DrovrApi {
   app: AppApi
   worktree: WorktreeApi
   git: GitApi
+  files: FilesApi
   update: UpdateApi
 }
