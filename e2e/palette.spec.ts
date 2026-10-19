@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { backToBoard, expectCardOpen, expectStatusOnBoard } from './card-view'
+import { clipboardWrites, recordClipboardWrites } from './clipboard-writes'
 import { launchApp, removeDataDirs } from './launch'
 import { plainCards } from './plain-cards'
 
@@ -455,6 +456,7 @@ const CARD_VIEW_ACTIONS = [
   'Close card',
   'Toggle panel',
   'Find',
+  'Copy command output',
   'Open in new window'
 ]
 
@@ -469,13 +471,14 @@ test('AC7: with a running card open, the card view actions and its moves are lis
 
   await openPalette()
   const actions = await titles(section('actions'))
-  expect(actions.slice(0, 10)).toEqual([
+  expect(actions.slice(0, 11)).toEqual([
     'Back to board',
     'Split right',
     'Split down',
     'Close card',
     'Toggle panel',
     'Find',
+    'Copy command output',
     'Open in new window',
     'Move card to In Progress',
     'Move card to Review',
@@ -590,6 +593,35 @@ test('#48 AC6: with a split card open the palette lists Zoom pane with its short
   await runAction('Zoom pane')
   await expect(page.getByTestId('pane-zoom')).toHaveCount(0)
   await expect(page.getByTestId('pane').first()).toBeVisible()
+})
+
+test('#60 AC6: Copy command output is listed with its shortcut and copies as the shortcut does', async () => {
+  // Shell /bin/sh, so only the marks the test prints reach the terminal (no shell integration).
+  await app?.close()
+  writeFileSync(
+    join(dataDir, 'drovr-settings.json'),
+    JSON.stringify({ version: 1, settings: { shell: '/bin/sh' } })
+  )
+  ;({ app, page } = await launchApp({ dataDir }))
+  await createWorkspace('Alpha')
+  const shortcut = await settingsShortcut('copyCommandOutput')
+  expect(shortcut).toBe(darwin ? 'Shift+Cmd+A' : 'Ctrl+Shift+A')
+  await newCard('api')
+  await recordClipboardWrites(app!)
+  // A marked command (prompt `$ `, then its output `three` between its C and D;0).
+  await run(
+    String.raw`printf '\033]133;A\007$ \033]133;B\007\033]133;C\007three\n\033]133;D;0\007'`
+  )
+  await expect.poll(async () => (await bufferLines()).includes('$ three')).toBe(true)
+
+  await openPalette()
+  await page.keyboard.type('copy output')
+  await expect(rows().first().getByTestId('palette-row-title')).toHaveText('Copy command output')
+  await expect(actionShortcut('Copy command output')).toHaveText(shortcut)
+  await page.keyboard.press('Enter')
+  await expect(palette()).toHaveCount(0)
+  await expect.poll(() => clipboardWrites(app!)).toEqual(['three'])
+  await expect.poll(terminalFocused).toBe(true)
 })
 
 test('AC10: New card goes to the board with the first column’s New card form open and focused', async () => {
