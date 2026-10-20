@@ -13,6 +13,7 @@ import { allowCardWindows, appWindow, registerCardWindows } from './card-windows
 import { registerClipboard } from './clipboard'
 import { registerDirectories } from './directories'
 import { registerFiles } from './files'
+import { registerAgents } from './agents'
 import { enableGlobalShortcutsPortal, registerGlobalShortcut } from './global-shortcut'
 import { registerGit } from './git'
 import { registerLinks } from './links'
@@ -80,7 +81,7 @@ function createWindow(settings: MainSettings): void {
   })
 
   // Its page opens its cards' own windows, and they close with it (#53 D3).
-  allowCardWindows(mainWindow, () => settings.backgroundColor())
+  allowCardWindows(mainWindow, () => settings.backgroundColor(), hiddenForTests)
 
   mainWindow.on('ready-to-show', () => {
     if (!hiddenForTests) mainWindow.show()
@@ -146,10 +147,11 @@ function startApp(): void {
   registerPorts()
   registerDirectories()
   registerAttention()
-  registerCardWindows()
+  registerCardWindows(hiddenForTests)
   registerWorktrees()
   registerGit(() => settings.shell())
   registerFiles(() => settings.editor())
+  registerAgents(() => settings.shell())
   const updates = registerUpdates(() => terminals.sessionCount)
 
   // The app is one local page: a dropped file or link must never replace it and inherit the bridge.

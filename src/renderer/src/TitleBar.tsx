@@ -4,6 +4,7 @@ import { portableDirectory as displayPath } from '../../core/sync-file'
 import { windowTitle } from '../../core/window-title'
 import type { Card, Workspace } from '../../core/workspace-store'
 import { BranchChip } from './BranchMenu'
+import { ToolIcon } from './AgentLogo'
 import { StartupTag } from './CardItem'
 import { useBranch } from './branches'
 import { homeDir } from './home'
@@ -75,16 +76,21 @@ function TitleBar({
             {card && (
               <>
                 <ChevronRight {...ICON} className="titlebar-separator" />
-                <span className="titlebar-current" data-testid="titlebar-card">
-                  {card.title}
-                </span>
                 {isShell ? (
-                  <span className="card-tag card-tag-shell" data-testid="titlebar-shell-tag">
-                    Shell
+                  <span
+                    className="card-tag card-tag-shell"
+                    data-testid="titlebar-shell-tag"
+                    title="Shell"
+                  >
+                    <ToolIcon tool="shell" />
+                    <span className="visually-hidden">Shell</span>
                   </span>
                 ) : (
                   <StartupTag startup={card.startup} />
                 )}
+                <span className="titlebar-current" data-testid="titlebar-card">
+                  {card.title}
+                </span>
                 {dir && branch && (
                   <BranchChip key={dir} dir={dir} branch={branch} worktree={worktree !== null} />
                 )}

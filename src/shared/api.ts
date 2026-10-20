@@ -2,6 +2,7 @@ import type { BoardCommand } from '../core/board-args'
 import type { BoardReply } from '../core/board-protocol'
 import type { GhosttyTheme } from '../core/ghostty-config'
 import type { GlobalShortcutState } from '../core/global-shortcut'
+import type { AgentChoice } from '../core/installed-agents'
 import type { KeptOutput } from '../core/kept-output'
 import type { OpenResult } from '../core/open-result'
 import type { FolderListing } from '../core/file-tree'
@@ -74,6 +75,7 @@ export const IPC = {
   filesList: 'files:list',
   filesStatus: 'files:status',
   filesOpen: 'files:open',
+  agentsInstalled: 'agents:installed',
   updateState: 'update:state',
   updateStateChanged: 'update:stateChanged',
   updateShow: 'update:show',
@@ -318,6 +320,14 @@ export interface GitApi {
   merge(dir: string, repo: string, cardBranch: string, branch: string): Promise<SyncResult>
 }
 
+export interface AgentsApi {
+  /**
+   * The agents whose CLI the user's login shell finds (`claude`, `codex`, `gemini`, `opencode`),
+   * so the startup selects can show the others disabled; null when the check failed.
+   */
+  installed(): Promise<AgentChoice[] | null>
+}
+
 /**
  * The side panel's Files tab (#55 D16), read by main inside the shown folder (an absolute,
  * existing folder): anything that resolves outside it is refused with `ok: false`.
@@ -434,5 +444,6 @@ export interface DrovrApi {
   worktree: WorktreeApi
   git: GitApi
   files: FilesApi
+  agents: AgentsApi
   update: UpdateApi
 }

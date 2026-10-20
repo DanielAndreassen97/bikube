@@ -33,7 +33,8 @@ import {
   CLAUDE_CODE_PROBE_OSC,
   isShiftEnter,
   SHIFT_ENTER,
-  shiftEnterIsNewLine
+  shiftEnterIsNewLine,
+  macLineEditKey
 } from '../../core/terminal-keys'
 import { opensLink } from '../../core/terminal-links'
 import { promptJumpTarget, type PromptJump } from '../../core/prompt-jumps'
@@ -192,6 +193,8 @@ export class XtermScreen implements CardScreen {
   private unlistenWindow: (() => void) | undefined
   /** The window the screen was last shown in (#53 D2). */
   private shownIn: Window | undefined
+  /** How many rows above the bottom the view was when last detached: kept across a move. */
+  private rowsFromBottom = 0
   private webgl: WebglAddon | undefined
   /** The line height and letter spacing the screen was last fitted with: either changes its cells. */
   private cell = ''
@@ -230,7 +233,7 @@ export class XtermScreen implements CardScreen {
       // The search addon's match highlights are decorations (#35 D8).
       allowProposedApi: true
     })
-    this.cell = `${behaviour.lineHeight}/${behaviour.letterSpacing}`
+    this.cell = cellKey(behaviour)
     followAppearance()
     liveScreens.add(this)
     this.host.className = 'terminal'
@@ -307,6 +310,13 @@ export class XtermScreen implements CardScreen {
         event.preventDefault()
         if (event.type === 'keydown' && !this.term.options.disableStdin)
           this.term.input(SHIFT_ENTER)
+        return false
+      }
+      // macOS line editing (Cmd+Backspace and the like), as other macOS terminals send it.
+      const edit = macLineEditKey(event, window.drovr.platform)
+      if (edit !== null) {
+        event.preventDefault()
+        if (event.type === 'keydown' && !this.term.options.disableStdin) this.term.input(edit)
         return false
       }
       const action = clipboardShortcut(event, window.drovr.platform)
@@ -429,30 +439,66 @@ export class XtermScreen implements CardScreen {
 
   /**
    * Shows the screen in `container`, fitted and kept fitted; returns the detach function. The
-   * container may be in a card's own window (#53 D2): xterm is opened again on its moved host,
-   * which makes it follow that window, before WebGL is loaded there.
+   * container may be in a card's own window (#53 D2): xterm follows that window, before WebGL is
+   * loaded there.
    */
   attach(container: HTMLElement): () => void {
     const view = (container.ownerDocument.defaultView ?? window) as Window & typeof globalThis
     container.appendChild(this.host)
-    // Opens it the first time; after that only points xterm at the host's window.
-    this.term.open(this.host)
+    if (this.term.element) this.followWindow(view)
+    else this.term.open(this.host)
     this.followDocument(container.ownerDocument)
     if (this.shownIn && this.shownIn !== view) this.dropPendingFrames(this.shownIn)
     this.shownIn = view
     this.listenTo(view)
     this.fitNow()
     this.loadWebgl()
-    const observer = new view.ResizeObserver(() => this.fitNow())
+    // Moved to another container (a card window and back), the view's scroll position resets
+    // as the moved host is laid out, which may take a while in a new window: for a second, each
+    // fit puts it back where it was (at the bottom following output, unless the user had
+    // scrolled up), as do the next frame and a short timer.
+    const restoreUntil = performance.now() + 1000
+    const observer = new view.ResizeObserver(() => {
+      this.fitNow()
+      if (performance.now() < restoreUntil) this.restoreScroll()
+    })
     observer.observe(container)
+    this.restoreScroll()
+    view.requestAnimationFrame(() => this.restoreScroll())
+    view.setTimeout(() => this.restoreScroll(), 250)
     this.term.refresh(0, this.term.rows - 1)
     return () => {
+      const buffer = this.term.buffer.active
+      this.rowsFromBottom = Math.max(0, buffer.baseY - buffer.viewportY)
       observer.disconnect()
       this.dropWebgl()
       this.unlistenWindow?.()
       this.unlistenWindow = undefined
       // Only from this container: it may already be shown elsewhere.
       if (this.host.parentElement === container) this.host.remove()
+    }
+  }
+
+  private restoreScroll(): void {
+    if (this.disposed) return
+    const target = Math.max(0, this.term.buffer.active.baseY - this.rowsFromBottom)
+    if (this.term.buffer.active.viewportY !== target) this.term.scrollToLine(target)
+  }
+
+  /**
+   * What xterm 6's `open` does on an opened terminal: point it at the window it is now shown in.
+   * Not `open` itself: `@xterm/addon-image` 0.9 wraps `setRenderer` again on every `open`, and the
+   * second wrapper calls itself, so loading WebGL afterwards overflowed the stack and left its
+   * canvas over the terminal. Private field, checked first, so another xterm version only loses
+   * the window change.
+   */
+  private followWindow(view: Window): void {
+    const core = (
+      this.term as unknown as { _core?: { _coreBrowserService?: { window?: unknown } } }
+    )._core
+    const browser = core?._coreBrowserService
+    if (browser && typeof browser.window === 'object' && browser.window !== view) {
+      browser.window = view
     }
   }
 
@@ -626,11 +672,11 @@ export class XtermScreen implements CardScreen {
     const cellChanged =
       options.fontFamily !== fontFamily ||
       options.fontSize !== fontSize ||
-      this.cell !== `${behaviour.lineHeight}/${behaviour.letterSpacing}`
+      this.cell !== cellKey(behaviour)
     if (!cellChanged) return
     options.fontFamily = fontFamily
     options.fontSize = fontSize
-    this.cell = `${behaviour.lineHeight}/${behaviour.letterSpacing}`
+    this.cell = cellKey(behaviour)
     this.fitNow()
   }
 
@@ -737,12 +783,18 @@ export class XtermScreen implements CardScreen {
   // WebGL where a real GPU backs it; xterm's DOM renderer stays in place otherwise.
   private loadWebgl(): void {
     if (this.webgl || !hardwareWebgl()) return
+    const webgl = new WebglAddon()
     try {
-      const webgl = new WebglAddon()
       webgl.onContextLoss(() => this.dropWebgl())
       this.term.loadAddon(webgl)
       this.webgl = webgl
     } catch {
+      // A half-loaded renderer would leave its canvas over the terminal.
+      try {
+        webgl.dispose()
+      } catch {
+        // Nothing more to remove.
+      }
       this.webgl = undefined
     }
   }
@@ -752,6 +804,10 @@ export class XtermScreen implements CardScreen {
     this.webgl = undefined
   }
 }
+
+/** What sizes a terminal's cell besides its font: a change refits it. */
+const cellKey = (b: TerminalAppearance['behaviour']): string =>
+  `${b.lineHeight}/${b.letterSpacing}/${b.fontWeight}`
 
 let router: SessionRouter | undefined
 let registry: CardSessions<XtermScreen> | undefined

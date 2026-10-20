@@ -294,6 +294,65 @@ test('AC6: Back, the shell exiting and deleting the card close its window', asyn
   await expect(card('Agent A')).toHaveCount(0)
 })
 
+// A card opened again after its window lost WebGL, and its failed load left a dead canvas the
+// window's size over the terminal: re-opening xterm made the image addon's renderer hook recurse.
+// The same canvases as before, by size; only bites where WebGL loads (a real GPU, not xvfb's).
+test('D2: back from its window, the card has the renderer it had before, the terminal’s size', async () => {
+  const canvases = (): Promise<string> =>
+    page.evaluate(() => {
+      const screen = document.querySelector('[data-testid=card-view] .xterm-screen')
+      if (!(screen instanceof HTMLElement)) return 'no screen'
+      const found = [...screen.querySelectorAll('canvas:not(.xterm-image-layer)')]
+      return found
+        .map((c) => ((c as HTMLElement).clientWidth === screen.clientWidth ? 'fitted' : 'other'))
+        .join(',')
+    })
+  await newCard('Agent A')
+  await expect.poll(canvases).not.toBe('no screen')
+  const before = await canvases()
+  expect(before).not.toContain('other')
+  await backToBoard(page)
+  const window = await openInWindow('Agent A')
+  await expect.poll(() => terminalFocused(window)).toBe(true)
+  const gone = closed(window)
+  await window.keyboard.press(SHORTCUTS.back).catch(() => undefined)
+  await gone
+  await card('Agent A').click()
+  await expectCardOpen(page, 'Agent A')
+  await expect.poll(canvases).toBe(before)
+})
+
+// Open in new window's shortcut pressed in the card's own window, or its Move to main window
+// button, moves the card back: the window closes and the main window opens it, still running.
+for (const by of ['shortcut', 'button'] as const) {
+  test(`the ${by} in a card window moves the card back to the main window, opened and running`, async () => {
+    await newCard('Agent A')
+    await run(page, 'echo before-$((40+2))')
+    await expect.poll(() => bufferLines(page)).toContain('before-42')
+    await backToBoard(page)
+    const window = await openInWindow('Agent A')
+    await expect.poll(() => terminalFocused(window)).toBe(true)
+    await expect(window.getByTestId('card-window-return')).toContainText('Move to main window')
+
+    const gone = closed(window)
+    if (by === 'shortcut') {
+      // The window closes on the keydown, before the press's keyup.
+      await window.keyboard
+        .press(darwin ? 'Meta+Shift+O' : 'Control+Shift+O')
+        .catch(() => undefined)
+    } else await window.getByTestId('card-window-return').click()
+    await gone
+    await expectCardOpen(page, 'Agent A')
+    await expect(page.getByTestId('card-view').getByTestId('card-window-return')).toHaveCount(0)
+    expect(await bufferLines(page)).toContain('before-42')
+    await run(page, 'echo after-$((50+3))')
+    await expect.poll(() => bufferLines(page)).toContain('after-53')
+    await backToBoard(page)
+    await expect(card('Agent A').getByTestId('card-in-window')).toHaveCount(0)
+    await expect(card('Agent A').getByTestId('card-status-label')).toHaveText('Running')
+  })
+}
+
 test("AC6: deleting the card's workspace closes its window", async () => {
   await newCard('Agent A')
   await backToBoard(page)
@@ -609,13 +668,6 @@ test('AC3: the shortcut opens the open card in its own window and the main windo
   // The new window has the keyboard, and the shell got none of the shortcut's keys.
   await expectCleanLine(window)
 
-  // In the card window the shortcut does nothing, and never reaches the shell (D5).
-  await window.keyboard.press(OPEN_WINDOW)
-  await window.waitForTimeout(300)
-  expect(app.windows()).toHaveLength(2)
-  await run(window, 'clear')
-  await expectCleanLine(window)
-
   // The workspace forgot its view (#31 D19): with the window closed the main window stays on
   // its board (D8).
   await window.close()
@@ -623,6 +675,7 @@ test('AC3: the shortcut opens the open card in its own window and the main windo
   await page.waitForTimeout(300)
   await expect(page.getByTestId('board')).toBeVisible()
   await expect(page.getByTestId('card-view')).toHaveCount(0)
+  // In the card window the same shortcut moves the card back: see "moves the card back".
 })
 
 test("AC3: the palette's Open in new window row opens the open card in its own window", async () => {
@@ -649,6 +702,8 @@ test('AC4: a palette pick and Next waiting card focus its window, changing nothi
   await expect(page.getByTestId('board')).toBeVisible()
   await expect(page.getByTestId('card-view')).toHaveCount(0)
 
+  // The main window focused: the card in its window isn't looked at, so it stays waiting.
+  await focusWindow(page, window)
   await run(window, 'board activity . waiting')
   // The first `board` of a run starts Drovr's executable as Node from a cold disk cache.
   await expect(card('Agent A').getByTestId('card-activity')).toHaveText('Waiting for you', {
@@ -790,11 +845,13 @@ test("AC12: a card waiting in its focused window notifies nothing; with the main
   await stubNotifications()
   const activity = card('Agent A').getByTestId('card-activity')
 
-  // Its own window focused: the user is looking at it.
+  // Its own window focused: the user is looking at it, so its Waiting for you is seen at once.
   await focusWindow(window, page)
-  await run(window, 'board activity . waiting')
+  await run(window, 'board activity . working')
   // The first `board` of a run starts Drovr's executable as Node from a cold disk cache.
-  await expect(activity).toHaveText('Waiting for you', { timeout: 15_000 })
+  await expect(activity).toHaveText('Working', { timeout: 15_000 })
+  await run(window, 'board activity . waiting')
+  await expect(activity).toHaveCount(0)
   await page.waitForTimeout(300)
   expect(await notifications()).toEqual([])
   await run(window, 'board activity . working')
@@ -893,6 +950,25 @@ test('D2: a card whose window closes while it prints keeps drawing where it show
   await window.close()
   window = await openInWindow('Agent A')
   await expectRedrawing(window)
+})
+
+// A folder whose tree is taller than the window scrolled the whole window, pushing the
+// terminal's last rows (Claude Code's input) below its bottom edge.
+test('D4: a long Files tree scrolls in its panel; the window and its terminal stay fitted', async () => {
+  for (let i = 0; i < 80; i++)
+    writeFileSync(join(dir, `file-${String(i).padStart(2, '0')}.txt`), '')
+  await newCard('Agent A')
+  await backToBoard(page)
+  const window = await openInWindow('Agent A')
+  await expect(window.getByTestId('files-row')).toHaveCount(81)
+  const layout = (): Promise<string> =>
+    window.evaluate(() => {
+      const root = document.scrollingElement ?? document.documentElement
+      const screen = document.querySelector('[data-testid=card-view] .xterm-screen')
+      const bottom = screen?.getBoundingClientRect().bottom ?? Infinity
+      return [root.scrollHeight <= root.clientHeight, bottom <= innerHeight].join(',')
+    })
+  await expect.poll(layout).toBe('true,true')
 })
 
 test('D4: a file or link dropped on the card window opens nothing', async () => {
