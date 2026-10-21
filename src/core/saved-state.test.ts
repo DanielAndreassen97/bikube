@@ -413,15 +413,32 @@ describe('shells, and a workspace defaulting to Shell', () => {
 
   it('reads saved shells, and rejects a bad one', () => {
     const shells = [
-      { id: 's1', name: 'Dev server', command: 'npm run dev', autostart: true, autoClose: true }
+      {
+        id: 's1',
+        name: 'Dev server',
+        command: 'npm run dev',
+        autostart: true,
+        type: 'trigger'
+      }
     ]
     const parsed = parseSavedState(file({ shells }))
     expect(parsed.ok && parsed.value.workspaces[0]!.shells).toEqual(shells)
-    // A file from before Auto close: off.
+    // A file from before Auto close and Start in the background: both off.
     const older = parseSavedState(
       file({ shells: [{ id: 's1', name: 'Dev server', command: 'npm run dev', autostart: true }] })
     )
-    expect(older.ok && older.value.workspaces[0]!.shells[0]!.autoClose).toBe(false)
+    expect(older.ok && older.value.workspaces[0]!.shells[0]!.type).toBe('shell')
+    // Before types: Close when the command stops or Start in the background, with a command,
+    // made a trigger; without a command it stays a shell.
+    const typeOf = (s: Record<string, unknown>): unknown => {
+      const read = parseSavedState(
+        file({ shells: [{ id: 's1', name: 'Dev', autostart: false, ...s }] })
+      )
+      return read.ok && read.value.workspaces[0]!.shells[0]!.type
+    }
+    expect(typeOf({ command: 'npm run dev', autoClose: true })).toBe('trigger')
+    expect(typeOf({ command: 'npm run dev', background: true })).toBe('trigger')
+    expect(typeOf({ command: '', background: true })).toBe('shell')
     expect(parseSavedState(file({ shells: [{ id: 's1', name: '' }] })).ok).toBe(false)
     expect(parseSavedState(file({ shells: 'nope' })).ok).toBe(false)
   })

@@ -14,7 +14,7 @@ import { SerializeAddon } from '@xterm/addon-serialize'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { runningCount } from '../../core/card-deletes'
-import { keymapAction, workspaceShortcut } from '../../core/keymap'
+import { keymapAction, terminalShortcut, workspaceShortcut } from '../../core/keymap'
 import { CardPanes } from '../../core/card-panes'
 import { CardSessions, type CardScreen, type OutputKeeper } from '../../core/card-sessions'
 import { keptRange } from '../../core/kept-output'
@@ -300,13 +300,11 @@ export class XtermScreen implements CardScreen {
     this.marks.onCommandEnded((command) => this.markFailed(command))
     this.term.attachCustomKeyEventHandler((event) => {
       // The configurable shortcuts (#31 D5) are handled by the view and the app; the shell never
-      // sees any part of them (D7), nor of Mod+1…9 (D18).
+      // sees any part of them (D7), nor of Mod+1…9 (D18) or the terminal digits.
       if (keymapAction(event, currentKeymap())) return false
       if (workspaceShortcut(event, window.drovr.platform) !== null) return false
-      if (
-        isShiftEnter(event) &&
-        shiftEnterIsNewLine(this.claudeCode, this.term.modes.sendFocusMode, this.sawProbe)
-      ) {
+      if (terminalShortcut(event, window.drovr.platform) !== null) return false
+      if (isShiftEnter(event) && this.claudeCodeRunning()) {
         event.preventDefault()
         if (event.type === 'keydown' && !this.term.options.disableStdin)
           this.term.input(SHIFT_ENTER)
@@ -324,9 +322,22 @@ export class XtermScreen implements CardScreen {
       // Stop the native paste event too, or xterm would paste twice.
       event.preventDefault()
       if (action === 'copy') void copySelection(this.term, clipboard)
-      else void pasteFromClipboard(this.term, clipboard)
+      else
+        void pasteFromClipboard(this.term, clipboard, {
+          // Claude Code reads an image from the clipboard on Ctrl+V, while it runs here.
+          accepts: () => this.claudeCodeRunning() && !this.term.options.disableStdin,
+          input: (data) => this.term.input(data)
+        })
       return false
     })
+  }
+
+  /**
+   * Whether Claude Code runs in this pane now: a Claude Code card's main pane or one that saw its
+   * probe, with focus reporting on (#58), as Shift+Enter reads it.
+   */
+  private claudeCodeRunning(): boolean {
+    return shiftEnterIsNewLine(this.claudeCode, this.term.modes.sendFocusMode, this.sawProbe)
   }
 
   get cols(): number {

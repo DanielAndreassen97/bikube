@@ -10,6 +10,7 @@ import { isWorkspaceLogo } from './workspace-logos'
 import {
   checkShell,
   checkWorktreeSetup,
+  isShellType,
   type Card,
   type CardWorktree,
   type Column,
@@ -141,15 +142,22 @@ function readShells(raw: unknown): WorkspaceShell[] | string {
   const shells: WorkspaceShell[] = []
   for (const s of raw) {
     if (!isObject(s) || !isId(s.id) || typeof s.name !== 'string') return 'bad shell'
+    const command = typeof s.command === 'string' ? s.command : ''
     const checked = checkShell({
       name: s.name,
-      command: typeof s.command === 'string' ? s.command : '',
+      command,
       autostart: s.autostart === true,
-      autoClose: s.autoClose === true
+      // Before types: a shell with a command and Close when the command stops or Start in the
+      // background set is a trigger.
+      type: isShellType(s.type)
+        ? s.type
+        : (s.autoClose === true || s.background === true) && command.trim()
+          ? 'trigger'
+          : 'shell'
     })
     if (!checked.ok || checked.value.name !== s.name) return 'bad shell'
     if (shells.some((other) => other.id === s.id)) return 'duplicate shell'
-    shells.push({ id: s.id, ...checked.value })
+    shells.push({ id: s.id, ...checked.value, ...(isId(s.runIn) && { runIn: s.runIn }) })
   }
   return shells
 }

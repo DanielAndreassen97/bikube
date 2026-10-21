@@ -124,18 +124,31 @@ export interface WorkspaceShell {
   /** Started when its workspace is first opened in a run of the app. */
   autostart: boolean
   /**
-   * The shell exits once its command ends on its own (`<command>; exit`); a Ctrl+C keeps the
-   * prompt. Only with a command.
+   * `shell`: a click opens it, typing its command (if any) each start. `trigger`: a click runs its
+   * command in the background (`<command>; exit`, out of the sidebar until opened) and it exits
+   * when the command ends, with a done or failed result; a click while it runs opens it. A
+   * trigger always has a command.
    */
-  autoClose: boolean
+  type: ShellType
+  /**
+   * The worktree card it runs in, by id: it starts in that card's directory while the card is on
+   * the board with its own worktree, else in the workspace's folder. This machine's: saved, never
+   * synced (a worktree is a folder on this machine). Absent for the workspace's folder.
+   */
+  runIn?: string
 }
+
+export type ShellType = 'shell' | 'trigger'
+
+export const isShellType = (value: unknown): value is ShellType =>
+  value === 'shell' || value === 'trigger'
 
 export interface ShellInput {
   name: string
   command: string
   autostart: boolean
-  /** Missing (an older file) is off. */
-  autoClose?: boolean
+  /** Missing is `shell`. */
+  type?: ShellType
 }
 
 export const MAX_SHELL_NAME_LENGTH = 100
@@ -246,6 +259,11 @@ export interface WorkspaceStore {
   /** Adds a shell at the end of the workspace's shells; name required, command one line or ''. */
   createShell(workspaceId: string, input: ShellInput): Result<WorkspaceShell>
   updateShell(workspaceId: string, shellId: string, input: ShellInput): Result<WorkspaceShell>
+  /**
+   * Where the shell runs from its next start: a worktree card of the workspace, or null for the
+   * workspace's folder. Saved on this machine only.
+   */
+  setShellRunIn(workspaceId: string, shellId: string, cardId: string | null): Result<WorkspaceShell>
   deleteShell(workspaceId: string, shellId: string): Result<void>
   /** Records that `claude --session-id` was typed for this card (#5 D5). */
   markClaudeStarted(workspaceId: string, cardId: string): Result<Card>
@@ -258,6 +276,12 @@ export interface WorkspaceStore {
   markAgentStarted(workspaceId: string, cardId: string, kind: AgentKind): Result<Card>
   /** The card's pending setup succeeded or was skipped (#39 D4, D6): it has none from now on. */
   clearCardSetup(workspaceId: string, cardId: string): Result<Card>
+  /**
+   * Moves a local card without a worktree into its own new one: it runs there from its next
+   * start, after the workspace's Worktree setup when it has one (#39 D2). Agents keep their
+   * conversations per folder, so the card gets a new agent session and starts its agent afresh.
+   */
+  moveCardToWorktree(workspaceId: string, cardId: string, worktree: NewCardWorktree): Result<Card>
   /**
    * Replaces every workspace with `workspaces` (a board from the sync folder, #13 D7, D14): the
    * active workspace stays active when it is still there, else the first one is (or none).
@@ -613,7 +637,32 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
     }
     const checked = checkShell(input)
     if (!checked.ok) return checked
-    const shell: WorkspaceShell = { id: shellId, ...checked.value }
+    const runIn = ws.shells.find((s) => s.id === shellId)?.runIn
+    const shell: WorkspaceShell = {
+      id: shellId,
+      ...checked.value,
+      ...(runIn !== undefined && { runIn })
+    }
+    this.replace({ ...ws, shells: ws.shells.map((s) => (s.id === shellId ? shell : s)) })
+    return { ok: true, value: shell }
+  }
+
+  setShellRunIn(
+    workspaceId: string,
+    shellId: string,
+    cardId: string | null
+  ): Result<WorkspaceShell> {
+    const ws = this.find(workspaceId)
+    if (!ws) return unknownWorkspace()
+    const current = ws.shells.find((s) => s.id === shellId)
+    if (!current) return { ok: false, error: { field: 'shell', message: 'Shell not found' } }
+    if (cardId !== null && !ws.cards.some((c) => c.id === cardId && c.worktree)) {
+      return fail('card', 'Not a card with its own worktree')
+    }
+    if ((current.runIn ?? null) === cardId) return { ok: true, value: current }
+    const shell: WorkspaceShell = { ...current }
+    if (cardId === null) delete shell.runIn
+    else shell.runIn = cardId
     this.replace({ ...ws, shells: ws.shells.map((s) => (s.id === shellId ? shell : s)) })
     return { ok: true, value: shell }
   }
@@ -661,6 +710,25 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
       const cleared: Card = { ...card }
       delete cleared.setup
       return { ok: true, value: cleared }
+    })
+  }
+
+  moveCardToWorktree(workspaceId: string, cardId: string, worktree: NewCardWorktree): Result<Card> {
+    const ws = this.find(workspaceId)
+    if (!ws) return unknownWorkspace()
+    return this.updateCard(workspaceId, cardId, (card) => {
+      if (card.host !== undefined) return fail('card', 'An SSH card can’t have its own worktree')
+      if (card.worktree) return fail('card', 'The card already has its own worktree')
+      const moved: Card = {
+        ...card,
+        directory: worktree.directory,
+        worktree: { ...worktree.worktree },
+        agentSessionId: this.generateSessionId(),
+        claudeStarted: false,
+        startedAgents: []
+      }
+      if (ws.worktreeSetup) moved.setup = ws.worktreeSetup
+      return { ok: true, value: moved }
     })
   }
 
@@ -763,25 +831,17 @@ export function checkShell(input: ShellInput): Result<Omit<WorkspaceShell, 'id'>
     const checked = checkStartup({ kind: 'custom', command })
     if (!checked.ok) return { ok: false, error: { ...checked.error, field: 'command' } }
   }
-  // Closing after it types `<command>; exit`: an ending `;`, `&` or `|` would make that a syntax
-  // error, and a `#` comment would comment the `exit` out (as #39's setup line refuses).
-  if (command && input.autoClose === true) {
-    if (/[;&|]$/.test(command)) {
-      return fail('command', "Command can't end with ; & or | when the shell closes after it")
-    }
-    if (/(^|\s)#/.test(command)) {
-      return fail('command', "Command can't have a # comment when the shell closes after it")
-    }
+  const type: ShellType = input.type === 'trigger' ? 'trigger' : 'shell'
+  // A trigger types `<command>; exit`: an ending `;`, `&` or `|` would make that a syntax error,
+  // and a `#` comment would comment the `exit` out (as #39's setup line refuses).
+  if (type === 'trigger') {
+    if (!command) return fail('command', 'A trigger needs a command')
+    if (/[;&|]$/.test(command))
+      return fail('command', "A trigger's command can't end with ; & or |")
+    if (/(^|\s)#/.test(command))
+      return fail('command', "A trigger's command can't have a # comment")
   }
-  return {
-    ok: true,
-    value: {
-      name,
-      command,
-      autostart: input.autostart === true,
-      autoClose: input.autoClose === true
-    }
-  }
+  return { ok: true, value: { name, command, autostart: input.autostart === true, type } }
 }
 
 /**

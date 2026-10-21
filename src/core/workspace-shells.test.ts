@@ -11,7 +11,13 @@ const workspace: Workspace = {
   nextCardNumber: 1,
   defaultStartup: { kind: 'claude' },
   shells: [
-    { id: 's1', name: 'Dev server', command: 'npm run dev', autostart: true, autoClose: false }
+    {
+      id: 's1',
+      name: 'Dev server',
+      command: 'npm run dev',
+      autostart: true,
+      type: 'shell'
+    }
   ],
   worktreeSetup: ''
 }
@@ -25,11 +31,13 @@ describe('workspace shells as cards', () => {
     expect(shellCards(workspace)[0]).toMatchObject({ directory: '/tmp/alpha' })
   })
 
-  it('marks a shell with Auto close and a command to exit after it, never one without', () => {
-    const closing = (command: string, autoClose: boolean): boolean | undefined =>
+  it('marks a trigger with a command to exit after it, never a shell or one without', () => {
+    const closing = (command: string, trigger: boolean): boolean | undefined =>
       shellCards({
         ...workspace,
-        shells: [{ id: 's1', name: 'Dev', command, autostart: false, autoClose }]
+        shells: [
+          { id: 's1', name: 'Dev', command, autostart: false, type: trigger ? 'trigger' : 'shell' }
+        ]
       })[1]!.exitAfterStartup
     expect(closing('npm run dev', true)).toBe(true)
     expect(closing('npm run dev', false)).toBeUndefined()
@@ -49,5 +57,39 @@ describe('workspace shells as cards', () => {
     expect(findShellCard(workspace, 's1')?.title).toBe('Dev server')
     expect(findShellCard(workspace, defaultShellId('w'))?.title).toBe('Default')
     expect(findShellCard(workspace, 'nope')).toBeUndefined()
+  })
+})
+
+describe('a shell running in a worktree card', () => {
+  const worktreeCard = {
+    id: 'k1',
+    columnId: 'c',
+    title: 'Add search',
+    directory: '/data/worktrees/alpha/add-search',
+    worktree: {
+      path: '/data/worktrees/alpha/add-search',
+      branch: 'drovr/add-search',
+      repo: '/tmp/alpha'
+    },
+    startup: { kind: 'shell' as const },
+    agentSessionId: 'x',
+    claudeStarted: false,
+    startedAgents: []
+  }
+  const withRunIn = (runIn: string, over: Partial<Workspace> = {}): Workspace => ({
+    ...workspace,
+    cards: [worktreeCard, { ...worktreeCard, id: 'plain', worktree: undefined }],
+    shells: [{ ...workspace.shells[0]!, runIn }],
+    ...over
+  })
+
+  it("starts in that card's directory", () => {
+    expect(findShellCard(withRunIn('k1'), 's1')?.directory).toBe('/data/worktrees/alpha/add-search')
+  })
+
+  it('starts in the workspace folder when the card is gone, has no worktree, or over SSH', () => {
+    expect(findShellCard(withRunIn('gone'), 's1')?.directory).toBe('/tmp/alpha')
+    expect(findShellCard(withRunIn('plain'), 's1')?.directory).toBe('/tmp/alpha')
+    expect(findShellCard(withRunIn('k1', { host: 'devbox' }), 's1')?.directory).toBe('/tmp/alpha')
   })
 })

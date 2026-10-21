@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { backToBoard, expectCardOpen, splitRight, zoomPane } from './card-view'
 import { launchApp, removeDataDirs } from './launch'
 import { plainCards } from './plain-cards'
+import { showShells } from './shells-tab'
 
 // A workspace's shells: the Default shell and named shells with a startup command, above the board.
 
@@ -39,6 +40,7 @@ async function createWorkspace(): Promise<void> {
   await page.getByTestId('workspace-name').fill('alpha')
   await page.getByTestId('workspace-submit').click()
   await expect(page.getByTestId('workspace-dialog')).toHaveCount(0)
+  await showShells(page)
 }
 
 const shell = (name: string): Locator =>
@@ -139,41 +141,61 @@ test('a named shell types its command each time it starts; restart, close, edit 
   await expect(page.getByTestId('shell')).toHaveCount(1)
 })
 
-test('Close when the command stops: the shell exits once its command ends; Ctrl+C keeps the prompt', async () => {
-  // Off and disabled without a command.
+test('a trigger runs its command in the background and shows done or failed; a click while it runs opens it', async () => {
+  // A trigger needs a command.
   await page.getByTestId('shell-add').click()
-  await expect(page.getByTestId('shell-auto-close')).toBeDisabled()
-  await expect(page.getByTestId('shell-dialog')).toContainText('Needs a startup command.')
-  await page.getByTestId('shell-name').fill('Once')
-  await page.getByTestId('shell-command').fill('echo once-$((40+2)); sleep 1')
-  await expect(page.getByTestId('shell-auto-close')).toBeEnabled()
-  await page.getByTestId('shell-auto-close').check()
-  await page.getByTestId('shell-submit').click()
-  await expect(page.getByTestId('shell-dialog')).toHaveCount(0)
-  // The strip shows the command as typed, without the `; exit`.
-  await expect(shell('Once')).toContainText('echo once-$((40+2)); sleep 1')
+  const dialog = page.getByTestId('shell-dialog')
+  await expect(dialog.getByTestId('shell-type-shell')).toBeChecked()
+  await dialog.getByTestId('shell-type-trigger').check()
+  await expect(dialog.getByTestId('shell-type-hint')).toContainText(
+    'runs the command in the background'
+  )
+  await dialog.getByTestId('shell-name').fill('Build')
+  await dialog.getByTestId('shell-submit').click()
+  await expect(dialog.getByTestId('shell-error-command')).toHaveText('A trigger needs a command')
+  await dialog.getByTestId('shell-command').fill('sleep 1; echo built-$((40+2))')
+  await dialog.getByTestId('shell-submit').click()
+  await expect(dialog).toHaveCount(0)
+  const status = shell('Build').getByTestId('trigger-status')
+  await expect(shell('Build').getByTestId('shell-open')).toHaveAttribute('data-type', 'trigger')
+  await expect(status).toHaveAttribute('data-status', 'idle')
+  // Shown as typed, without the `; exit`.
+  await expect(shell('Build')).toContainText('sleep 1; echo built-$((40+2))')
 
-  // Its command ends on its own: the shell exits, the view goes back to the board.
-  await shell('Once').getByTestId('shell-open').click()
-  await expectCardOpen(page, 'Once')
-  await expect.poll(lines).toContain('once-42')
-  await expect(page.getByTestId('board')).toBeVisible({ timeout: 10_000 })
-  await expect.poll(() => running('Once')).toBe('false')
+  // A click runs it out of sight and out of the sidebar, then it is done with its last line.
+  const tree = page.getByTestId('workspace-terminal')
+  await shell('Build').getByTestId('shell-open').click()
+  await expect(status).toHaveAttribute('data-status', 'running')
+  await expect(page.getByTestId('card-view')).toHaveCount(0)
+  await expect(tree).toHaveCount(0)
+  await expect(status).toHaveAttribute('data-status', 'done', { timeout: 10_000 })
+  await expect(status).toHaveAttribute('title', 'Done: built-42')
+  await expect.poll(() => running('Build')).toBe('false')
 
-  // Ctrl+C stops the list, so the shell stays at its prompt.
-  await shellMenu('Once', 'edit')
-  await expect(page.getByTestId('shell-auto-close')).toBeChecked()
-  await page.getByTestId('shell-command').fill('sleep 30')
-  await page.getByTestId('shell-submit').click()
-  await shell('Once').getByTestId('shell-open').click()
-  await expectCardOpen(page, 'Once')
-  await expect.poll(lines).toContainEqual(expect.stringContaining('sleep 30; exit'))
-  await page.waitForTimeout(500)
-  await page.keyboard.press('Control+C')
-  await page.keyboard.type('echo still-$((50+3))')
-  await page.keyboard.press('Enter')
-  await expect.poll(lines).toContain('still-53')
-  await expectCardOpen(page, 'Once')
+  // A failing command: failed, with its exit code and last line; a click runs it again.
+  await shellMenu('Build', 'edit')
+  await expect(dialog.getByTestId('shell-type-trigger')).toBeChecked()
+  await dialog.getByTestId('shell-command').fill('echo broke-$((1+1)); false')
+  await dialog.getByTestId('shell-submit').click()
+  await shell('Build').getByTestId('shell-open').click()
+  await expect(status).toHaveAttribute('data-status', 'failed', { timeout: 10_000 })
+  await expect(status).toHaveAttribute('title', 'Failed (exit 1): broke-2')
+
+  // While it runs, a click opens it, and from then on it is in the sidebar.
+  await shellMenu('Build', 'edit')
+  await dialog.getByTestId('shell-command').fill('echo waiting-$((40+3)); sleep 30')
+  await dialog.getByTestId('shell-submit').click()
+  await shell('Build').getByTestId('shell-open').click()
+  await expect(status).toHaveAttribute('data-status', 'running')
+  await shell('Build').getByTestId('shell-open').click()
+  await expectCardOpen(page, 'Build')
+  await expect.poll(lines).toContain('waiting-43')
+  await backToBoard(page)
+  await expect(tree).toHaveText(['Build'])
+
+  // Closed, it is idle again, not failed.
+  await shellMenu('Build', 'close')
+  await expect(status).toHaveAttribute('data-status', 'idle')
 })
 
 test('a shell must have a name and a one-line command; the Default one has no edit or delete', async () => {
@@ -233,4 +255,48 @@ test('#48 AC7: the Default shell split into 2 panes zooms its focused pane and r
   await expect(panes.nth(0)).toBeVisible()
   await expect(panes.nth(1)).toBeVisible()
   await expect(panes.nth(1)).toHaveAttribute('data-focused', 'true')
+})
+
+test('a shell and a trigger show their type, and a trigger turned into a shell opens on a click', async () => {
+  await page.getByTestId('shell-add').click()
+  const dialog = page.getByTestId('shell-dialog')
+  await dialog.getByTestId('shell-type-trigger').check()
+  await dialog.getByTestId('shell-name').fill('Watcher')
+  await dialog.getByTestId('shell-command').fill('echo watching-$((40+2)); sleep 30')
+  await dialog.getByTestId('shell-submit').click()
+  await expect(dialog).toHaveCount(0)
+  await expect(shell('Default').getByTestId('shell-open')).toHaveAttribute('data-type', 'shell')
+  await expect(shell('Default').getByTestId('trigger-status')).toHaveCount(0)
+  await expect(shell('Watcher').getByTestId('trigger-status')).toHaveCount(1)
+
+  await shellMenu('Watcher', 'edit')
+  await dialog.getByTestId('shell-type-shell').check()
+  await dialog.getByTestId('shell-submit').click()
+  await expect(shell('Watcher').getByTestId('shell-open')).toHaveAttribute('data-type', 'shell')
+  await shell('Watcher').getByTestId('shell-open').click()
+  await expectCardOpen(page, 'Watcher')
+  await expect.poll(lines).toContain('watching-42')
+})
+
+test('with the panel hidden, the title bar counts running shells and opens the Shells tab', async () => {
+  const chip = page.getByTestId('titlebar-shells')
+  await shell('Default').getByTestId('shell-start').click()
+  await expect.poll(() => running('Default')).toBe('true')
+  // Shown only while the panel is hidden.
+  await expect(chip).toHaveCount(0)
+  await page.getByTestId('side-panel-tab-files').click()
+  await page.getByTestId('titlebar-panel').click()
+  await expect(page.getByTestId('side-panel')).toHaveCount(0)
+  await expect(chip).toHaveText('1 shell')
+  await expect(chip).toHaveAttribute('title', 'Running: Default shell. Show them in the panel')
+  await chip.click()
+  await expect(page.getByTestId('side-panel')).toBeVisible()
+  await expect(page.getByTestId('side-panel-tab-shells')).toHaveAttribute('aria-selected', 'true')
+  await expect(chip).toHaveCount(0)
+
+  // Nothing running, nothing shown.
+  await shell('Default').getByTestId('shell-stop').click()
+  await expect.poll(() => running('Default')).toBe('false')
+  await page.getByTestId('titlebar-panel').click()
+  await expect(chip).toHaveCount(0)
 })

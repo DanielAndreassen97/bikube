@@ -14,11 +14,12 @@ import {
 import { fakeSshHome, removeRemoteForwards, type FakeSshHome } from './fake-ssh'
 import { launchApp, removeDataDirs } from './launch'
 import { plainCards } from './plain-cards'
+import { showShells } from './shells-tab'
 
 // Dev server chips (#49): a local card's pane (main or extra, S2) printing a localhost URL shows
 // a `localhost:<port>` chip on its board card while something listens there, and a named shell's
-// beside it in the shell strip (S2). The servers are Node
-// HTTP servers in this test process on free ports; `shell.openExternal` is stubbed. The URLs are
+// under its row in the side panel's Shells tab (S2). The servers are Node HTTP servers in this
+// test process on free ports; `shell.openExternal` is stubbed. The URLs are
 // printed with `printf` and the port as an argument, so the typed command line itself holds none.
 
 let app: ElectronApplication | undefined
@@ -327,11 +328,12 @@ test('AC5: an extra pane feeds its card, main pane first, and closing it forgets
   await expect(chips('web')).toHaveText([`localhost:${r}`], { timeout: CHIP_MS })
 })
 
-test("AC6: a named shell's printed, listening port shows beside it in the shell strip", async () => {
+test("AC6: a named shell's printed, listening port shows under its row in the Shells tab", async () => {
   const port = await listen()
   await launch()
   const opened = await recordOpenedLinks()
   await createWorkspace()
+  await showShells(page)
   await page.getByTestId('shell-add').click()
   await page.getByTestId('shell-name').fill('Dev server')
   await page.getByTestId('shell-command').fill(`printf 'http://localhost:%s/\\n' ${port}`)
@@ -345,12 +347,44 @@ test("AC6: a named shell's printed, listening port shows beside it in the shell 
 
   const chip = shell.getByTestId('dev-server-chip')
   await expect(chip).toHaveText([`localhost:${port}`], { timeout: CHIP_MS })
-  // Right after the shell's own chip (D7); the Default shell has none.
-  await expect(shell.locator('.shell-chip + .shell-menu-wrap + .dev-servers')).toHaveCount(1)
+  // Under the shell's own row in the Shells tab (D7); the Default shell has none.
+  await expect(shell.locator(':scope > .dev-servers')).toHaveCount(1)
   await expect(
     page.locator('[data-testid="shell"][data-shell-name="Default"]').getByTestId('dev-servers')
   ).toHaveCount(0)
   await chip.click()
   await expect.poll(opened).toEqual([`http://localhost:${port}/`])
   await expect(page.getByTestId('card-view')).toHaveCount(0)
+})
+
+test('a trigger spins while its command runs, and shows the running dot once a port it printed listens', async () => {
+  const port = await freePort()
+  await launch()
+  await createWorkspace()
+  await showShells(page)
+  await page.getByTestId('shell-add').click()
+  const dialog = page.getByTestId('shell-dialog')
+  await dialog.getByTestId('shell-type-trigger').check()
+  await dialog.getByTestId('shell-name').fill('Dev server')
+  await dialog
+    .getByTestId('shell-command')
+    .fill(`printf 'http://localhost:%s/\\n' ${port}; sleep 30`)
+  await dialog.getByTestId('shell-submit').click()
+  await expect(dialog).toHaveCount(0)
+  const shell = page.locator('[data-testid="shell"][data-shell-name="Dev server"]')
+  const status = shell.getByTestId('trigger-status')
+  await shell.getByTestId('shell-open').click()
+
+  // Nothing listens yet: starting up.
+  await expect(status).toHaveAttribute('data-status', 'running')
+  await page.waitForTimeout(CHIP_MS)
+  await expect(status).toHaveAttribute('data-status', 'running')
+  // Its server is up: serving, with its link.
+  await listen(port)
+  await expect(status).toHaveAttribute('data-status', 'serving', { timeout: CHIP_MS })
+  await expect(status).toHaveAttribute('title', `Running, listening on localhost:${port}`)
+  await expect(shell.getByTestId('dev-server-chip')).toHaveText([`localhost:${port}`])
+  // Down again: back to starting up.
+  await stopListening(port)
+  await expect(status).toHaveAttribute('data-status', 'running', { timeout: CHIP_MS })
 })

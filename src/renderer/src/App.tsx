@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { workspaceDeleteMessage } from '../../core/card-deletes'
-import { keymapAction, workspaceShortcut } from '../../core/keymap'
+import { keymapAction, terminalShortcut, workspaceShortcut } from '../../core/keymap'
 import type { PaletteAction } from '../../core/palette'
 import { syncStatusText } from '../../core/sync-status'
 import {
@@ -15,6 +15,7 @@ import {
 } from '../../core/view-memory'
 import { nextWaitingCard } from '../../core/waiting'
 import { onOpenRequest, setLookingAt, waitingQueue } from './attention'
+import { startInBackground } from './background-shells'
 import { removeWorkspace, startCard } from './card-actions'
 import { findShellCard, shellCards } from '../../core/workspace-shells'
 import { defaultShellId, type Workspace } from '../../core/workspace-store'
@@ -34,7 +35,9 @@ import WorkspaceDialog from './WorkspaceDialog'
 import Board from './Board'
 import EmptyState from './EmptyState'
 import SettingsDialog from './SettingsDialog'
+import { useHeldNumbers } from './held-numbers'
 import { requestNewCard } from './new-card-request'
+import { useOpenTerminals } from './open-terminals'
 import { currentKeymap, settingsStore, useSettings } from './settings'
 import Sidebar from './Sidebar'
 import TitleBar from './TitleBar'
@@ -203,7 +206,8 @@ function App(): React.JSX.Element {
     autostarted.current.add(active.id)
     for (const shell of active.shells) {
       if (shell.autostart && cardTerminals().runState(shell.id)?.kind !== 'running') {
-        startCard(active.id, shell.id)
+        if (shell.type === 'trigger') startInBackground(active.id, shell.id)
+        else startCard(active.id, shell.id)
       }
     }
   }, [active])
@@ -331,6 +335,34 @@ function App(): React.JSX.Element {
     }
   }, [workspaceIds, onSelectWorkspace])
 
+  // Ctrl+1…9 on macOS (Alt+1…9 elsewhere) open the active workspace's 1st…9th running card or
+  // shell in its sidebar tree's order, as a click on its row; swallowed like Mod+1…9.
+  const terminals = useOpenTerminals(workspaces)
+  const terminalKeys = (activeId ? (terminals.get(activeId) ?? []) : [])
+    .map((t) => `${t.workspaceId}\t${t.cardId}`)
+    .join('\n')
+  useEffect(() => {
+    const rows = terminalKeys.split('\n').filter(Boolean)
+    const onKey = (event: KeyboardEvent): void => {
+      const number = terminalShortcut(event, window.drovr?.platform ?? '')
+      if (number === null) return
+      if (document.querySelector('[aria-modal="true"]')) return
+      event.preventDefault()
+      event.stopPropagation()
+      if (event.type !== 'keydown' || event.repeat) return
+      const row = rows[number - 1]
+      if (!row) return
+      const [workspaceId, cardId] = row.split('\t')
+      onPaletteOpen(workspaceId, cardId)
+    }
+    const types = ['keydown', 'keypress', 'keyup'] as const
+    for (const type of types) window.addEventListener(type, onKey, true)
+    return () => {
+      for (const type of types) window.removeEventListener(type, onKey, true)
+    }
+  }, [terminalKeys, onPaletteOpen])
+  const held = useHeldNumbers(window.drovr?.platform ?? '')
+
   return (
     <div className={darwin ? 'app app-darwin' : 'app'} data-testid="app">
       <TitleBar
@@ -354,14 +386,17 @@ function App(): React.JSX.Element {
           syncStatus={syncStatus}
           openId={openId}
           onOpenTerminal={onPaletteOpen}
+          heldNumbers={held}
         />
         <main className="main">
           {active && openCard ? (
             <CardView
               key={openCard.id}
               card={openCard}
+              workspaceId={active.id}
               onBack={closeCard}
               onOpenInWindow={onOpenInWindow}
+              onOpenShell={onOpenCard}
             />
           ) : active ? (
             // The side panel beside the board shows the workspace's folder (#57 D1, D2).
@@ -371,6 +406,8 @@ function App(): React.JSX.Element {
                 <SidePanel
                   folder={active.directory}
                   ssh={active.host !== undefined}
+                  workspaceId={active.id}
+                  onOpenShell={onOpenCard}
                   onHide={() => settingsStore.update({ sidePanelOpen: false })}
                 />
               )}

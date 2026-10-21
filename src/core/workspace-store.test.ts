@@ -1105,13 +1105,13 @@ describe('shells', () => {
       s.createShell(w.id, { name: 'Two lines', command: 'a\nb', autostart: false })
     ).toMatchObject({ ok: false, error: { field: 'command' } })
 
-    expect(dev.autoClose).toBe(false)
+    expect(dev.type).toBe('shell')
     ok(
       s.updateShell(w.id, dev.id, {
         name: 'Web',
         command: 'npm start',
         autostart: false,
-        autoClose: true
+        type: 'trigger'
       })
     )
     expect(s.getState().workspaces[0].shells[0]).toEqual({
@@ -1119,14 +1119,18 @@ describe('shells', () => {
       name: 'Web',
       command: 'npm start',
       autostart: false,
-      autoClose: true
+      type: 'trigger'
     })
-    // Closing after the command types `<command>; exit`: endings and comments that break it.
+    // A trigger needs a command.
+    expect(
+      s.updateShell(w.id, dev.id, { name: 'Web', command: ' ', autostart: false, type: 'trigger' })
+    ).toEqual({ ok: false, error: { field: 'command', message: 'A trigger needs a command' } })
+    // A trigger types `<command>; exit`: endings and comments that break it.
     for (const command of ['npm run dev;', 'npm run dev &', 'a |', 'a &&', 'npm run dev # note']) {
       expect(
-        s.updateShell(w.id, dev.id, { name: 'Web', command, autostart: false, autoClose: true })
+        s.updateShell(w.id, dev.id, { name: 'Web', command, autostart: false, type: 'trigger' })
       ).toMatchObject({ ok: false, error: { field: 'command' } })
-      // Without closing, they are typed as written.
+      // A shell types them as written.
       ok(s.updateShell(w.id, dev.id, { name: 'Web', command, autostart: false }))
     }
     ok(
@@ -1134,7 +1138,7 @@ describe('shells', () => {
         name: 'Web',
         command: 'echo a#b',
         autostart: false,
-        autoClose: true
+        type: 'trigger'
       })
     )
     ok(s.deleteShell(w.id, plain.id))
@@ -1313,5 +1317,79 @@ describe('automatic move rules (#42 D2, D9, AC12)', () => {
     expect(s.getState().workspaces[0].autoMove).toEqual({ stopped: backlog.id })
     ok(s.deleteColumn(w.id, backlog.id))
     expect('autoMove' in s.getState().workspaces[0]).toBe(false)
+  })
+})
+
+describe('moveCardToWorktree', () => {
+  const worktree = {
+    directory: '/data/worktrees/repo-abc123/fix',
+    worktree: { path: '/data/worktrees/repo-abc123/fix', branch: 'drovr/fix', repo: '/tmp/repo' }
+  }
+
+  it('moves a plain local card into the worktree, with the setup and a fresh agent session', () => {
+    let sessions = 0
+    const s = new InMemoryWorkspaceStore({ generateSessionId: () => `session-${++sessions}` })
+    const w = ok(s.createWorkspace({ name: 'a', directory: '/tmp/repo', worktreeSetup: 'npm ci' }))
+    const c = ok(s.createCard(w.id, w.columns[0].id, 'fix'))
+    ok(s.markClaudeStarted(w.id, c.id))
+    ok(s.markAgentStarted(w.id, c.id, 'codex'))
+    const moved = ok(s.moveCardToWorktree(w.id, c.id, worktree))
+    expect(moved).toEqual({
+      ...c,
+      directory: worktree.directory,
+      worktree: worktree.worktree,
+      setup: 'npm ci',
+      agentSessionId: 'session-2',
+      claudeStarted: false,
+      startedAgents: []
+    })
+    expect(s.getState().workspaces[0].cards[0]).toEqual(moved)
+  })
+
+  it('adds no setup when the workspace has none', () => {
+    const s = make()
+    const w = ok(s.createWorkspace({ name: 'a', directory: '/tmp/repo' }))
+    const c = ok(s.createCard(w.id, w.columns[0].id, 'fix'))
+    expect(ok(s.moveCardToWorktree(w.id, c.id, worktree))).not.toHaveProperty('setup')
+  })
+
+  it('refuses a card that has a worktree already and an SSH card, changing nothing', () => {
+    const s = make()
+    const w = ok(s.createWorkspace({ name: 'a', directory: '/tmp/repo' }))
+    const c = ok(s.createCard(w.id, w.columns[0].id, 'wt', undefined, worktree))
+    const r = ok(s.createWorkspace({ name: 'r', directory: '~/a', host: 'devbox' }))
+    const remote = ok(s.createCard(r.id, r.columns[0].id, 'x'))
+    const before = s.getState()
+    expect(s.moveCardToWorktree(w.id, c.id, worktree)).toMatchObject({ ok: false })
+    expect(s.moveCardToWorktree(r.id, remote.id, worktree)).toMatchObject({ ok: false })
+    expect(s.getState()).toBe(before)
+  })
+})
+
+describe('setShellRunIn', () => {
+  const worktree = {
+    directory: '/data/worktrees/repo-abc123/fix',
+    worktree: { path: '/data/worktrees/repo-abc123/fix', branch: 'drovr/fix', repo: '/tmp/repo' }
+  }
+
+  it("sets a shell's worktree card and clears it; an edit keeps it", () => {
+    const s = make()
+    const w = ok(s.createWorkspace({ name: 'a', directory: '/tmp/repo' }))
+    const k = ok(s.createCard(w.id, w.columns[0].id, 'fix', undefined, worktree))
+    const sh = ok(s.createShell(w.id, { name: 'Dev', command: 'npm run dev', autostart: false }))
+    expect(ok(s.setShellRunIn(w.id, sh.id, k.id)).runIn).toBe(k.id)
+    expect(
+      ok(s.updateShell(w.id, sh.id, { name: 'Web', command: '', autostart: false })).runIn
+    ).toBe(k.id)
+    expect(ok(s.setShellRunIn(w.id, sh.id, null))).not.toHaveProperty('runIn')
+  })
+
+  it('refuses a card without its own worktree and an unknown shell', () => {
+    const s = make()
+    const w = ok(s.createWorkspace({ name: 'a', directory: '/tmp/repo' }))
+    const plain = ok(s.createCard(w.id, w.columns[0].id, 'plain'))
+    const sh = ok(s.createShell(w.id, { name: 'Dev', command: '', autostart: false }))
+    expect(s.setShellRunIn(w.id, sh.id, plain.id)).toMatchObject({ ok: false })
+    expect(s.setShellRunIn(w.id, 'nope', null)).toMatchObject({ ok: false })
   })
 })

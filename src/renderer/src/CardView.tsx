@@ -1,4 +1,5 @@
 import { X } from 'lucide-react'
+import { markOpened } from './background-shells'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { keymapAction } from '../../core/keymap'
 import { canSplit, MAIN_PANE, paneIds, type SplitTree } from '../../core/split-tree'
@@ -177,17 +178,25 @@ function PaneTree({
  */
 function CardView({
   card,
+  workspaceId,
   onBack,
-  onOpenInWindow
+  onOpenInWindow,
+  onOpenShell
 }: {
   card: Card
+  /** The workspace the card or shell is in. */
+  workspaceId: string
   onBack: () => void
+  /** Opens a shell from the side panel's Shells tab. */
+  onOpenShell: (shellId: string) => void
   /** Opens the card in its own window (#53 D6); none in a card window, where it does nothing (D5). */
   onOpenInWindow?: () => void
 }): React.JSX.Element {
   // The main window, or the card's own window (#53 D5): its keys, dialogs and focus are that one's.
   const view = useViewWindow()
   const runState = useCardRunState(card.id)
+  // Shown here, a trigger is listed in the sidebar from now on.
+  useEffect(() => markOpened(card.id), [card.id])
   const [closing, setClosing] = useState(false)
   // A card that stops or fails while its Close dialog is open has nothing left to close.
   if (closing && runState.kind !== 'running') setClosing(false)
@@ -303,6 +312,9 @@ function CardView({
         <SidePanel
           folder={card.directory}
           ssh={card.host !== undefined}
+          workspaceId={workspaceId}
+          openCard={card}
+          onOpenShell={onOpenShell}
           onHide={() => {
             settingsStore.update({ sidePanelOpen: false })
             // The hide button is gone: keyboard focus goes back to the focused pane's terminal.

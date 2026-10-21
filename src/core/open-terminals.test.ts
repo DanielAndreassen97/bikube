@@ -57,7 +57,7 @@ describe('openTerminals', () => {
           name: 'Dev server',
           command: 'npm run dev',
           autostart: false,
-          autoClose: false
+          type: 'shell'
         }
       ]
     )
@@ -108,7 +108,7 @@ describe('openTerminals', () => {
           name: 'Dev server',
           command: 'npm run dev',
           autostart: false,
-          autoClose: false
+          type: 'shell'
         }
       ]
     )
@@ -119,6 +119,21 @@ describe('openTerminals', () => {
       ['Script', 'custom'],
       ['Dev server', 'shell']
     ])
+  })
+
+  it('leaves a running trigger out until it has been opened', () => {
+    const shell = (id: string, trigger: boolean): Workspace['shells'][number] => ({
+      id,
+      name: id,
+      command: 'npm run dev',
+      autostart: false,
+      type: trigger ? 'trigger' : 'shell'
+    })
+    const a = workspace('a', [], [shell('bg', true), shell('plain', false)])
+    const ids = (opened: (id: string) => boolean): string[] =>
+      openTerminals([a], running('bg', 'plain'), noActivity, opened).map((r) => r.cardId)
+    expect(ids(() => false)).toEqual(['plain'])
+    expect(ids((id) => id === 'bg')).toEqual(['bg', 'plain'])
   })
 
   it('is empty when nothing runs', () => {

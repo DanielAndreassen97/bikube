@@ -196,6 +196,32 @@ button {
   -webkit-app-region: no-drag;
 }
 
+/* Running shells while the panel is hidden, just before its button, which then follows it. */
+.titlebar-shells {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-shells:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.titlebar-shells + .titlebar-panel {
+  margin-left: var(--space-1);
+}
+
 .titlebar-panel[aria-pressed='true'] {
   background: var(--accent-soft);
   color: var(--text);
@@ -434,20 +460,10 @@ button {
   font-weight: 600;
 }
 
-/* What a terminal runs (an agent, a Custom command): a faint tint, its logo and its stretch of
-   the tree's line in the kind's colour, as the board's tag. Shells stay neutral. */
+/* What a terminal runs (an agent, a Custom command): its logo and its stretch of the tree's line
+   in the kind's colour, as the board's tag. Shells stay neutral. */
 .workspace-terminals > li {
   position: relative;
-}
-
-.workspace-terminals > li[data-kind]:not([data-kind='shell']) .workspace-terminal:not(.active) {
-  background: color-mix(in srgb, var(--kind) 7%, transparent);
-}
-
-.workspace-terminals
-  > li[data-kind]:not([data-kind='shell'])
-  .workspace-terminal:not(.active):hover {
-  background: color-mix(in srgb, var(--kind) 14%, transparent);
 }
 
 .workspace-terminals > li[data-kind]:not([data-kind='shell'])::before {
@@ -478,6 +494,23 @@ button {
   opacity: 0.7;
 }
 
+/* The number a held modifier picks with a digit (Mod+1…9 workspaces, Ctrl+1…9 or Alt+1…9
+   terminals), in place of the badge's or the row's logo. */
+.held-number {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.workspace-terminal-kind.held-number {
+  width: 14px;
+  justify-content: center;
+  opacity: 1;
+  color: var(--text);
+}
+
 .workspace-terminal-title {
   flex: 1;
   min-width: 0;
@@ -492,7 +525,7 @@ button {
 }
 
 /* A running terminal's status (`StatusIcon`), in the sidebar tree and on the board card. Running
-   with nothing to report is the Shells strip's green dot. */
+   with nothing to report is the green running dot. */
 .status-icon {
   flex: none;
   display: inline-flex;
@@ -1029,6 +1062,11 @@ button {
   padding-left: calc(var(--space-3) + 14px + var(--space-2));
 }
 
+/* A group's items that draw their own icon column (a check), lined up with the menu's icons. */
+.menu-group .menu-item.menu-item-checkable {
+  padding-left: var(--space-3);
+}
+
 .menu-label {
   margin: 0;
   padding: var(--space-1) var(--space-3);
@@ -1225,6 +1263,25 @@ button {
 .field label {
   color: var(--text-muted);
   font-size: var(--text-xs);
+}
+
+/* A field of radio choices (a shell's type): a fieldset that reads like the other fields. */
+fieldset.field {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+}
+
+fieldset.field > legend {
+  margin-bottom: var(--space-1);
+  padding: 0;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+fieldset.field .segmented .radio {
+  color: var(--text);
+  font-size: var(--text-sm);
 }
 
 .field-row {
@@ -1659,16 +1716,53 @@ button.dev-server-chip:focus-visible {
 .card-status,
 .card-agent-status,
 .card-status-line,
+/* A card's Claude Code context: a thin bar filling with its window, and the percentage. */
 .card-usage {
+  --context: var(--accent);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   color: var(--text-muted);
   font-size: var(--text-xs);
   line-height: 1.4;
+}
+
+.card-usage[data-level='high'] {
+  --context: var(--pill-question-text);
+}
+
+.card-usage[data-level='full'] {
+  --context: var(--danger);
+}
+
+.card-context-track {
+  flex: 1;
+  min-width: 0;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--chip);
   overflow: hidden;
 }
 
+.card-context-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--context);
+  transition: width var(--transition);
+}
+
+.card-context-text {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.card-usage:not([data-level='ok']) .card-context-text {
+  color: var(--context);
+}
+
 .card-status,
-.card-status-line,
-.card-usage {
+.card-status-line {
   display: block;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3123,6 +3217,29 @@ button.dev-server-chip:focus-visible {
   white-space: nowrap;
 }
 
+/* A folder of branches: its chevron, its path and how many branches it holds. */
+.branch-menu-folder .branch-menu-name {
+  flex: 1;
+  color: var(--text-muted);
+}
+
+.branch-menu-count {
+  flex: none;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--chip);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.branch-menu-more {
+  color: var(--accent);
+  font-family: var(--font-ui);
+}
+
 .branch-menu-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -3196,48 +3313,67 @@ button.dev-server-chip:focus-visible {
   font-family: var(--font-mono);
 }
 
-/* The workspace's shells, above the board. */
-.shells {
+/* The side panel's Shells tab: New shell, then one row per shell. */
+.shells-tab {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  flex-direction: column;
   gap: var(--space-2);
+  padding: var(--space-2);
 }
 
-.shells-label {
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.shell-chip-wrap {
-  position: relative;
+.shells-add {
+  align-self: flex-start;
   display: inline-flex;
   align-items: center;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--surface);
+  gap: 4px;
 }
 
-.shell-chip-wrap:hover {
-  border-color: var(--border-strong);
+.shell-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.shell-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 320px;
-  padding: 4px 4px 4px var(--space-3);
+/* A shell: what it is and runs on the left, its buttons on the right, then where it runs and its
+   dev servers under both, lined up with its name. */
+.shell-row {
+  --shell-indent: 20px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  padding: 6px var(--space-2);
+  border-radius: var(--radius-sm);
+  transition: background-color var(--transition);
+}
+
+.shell-row:hover {
+  background: var(--surface-hover);
+}
+
+.shell-row-open {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 0;
   border: 0;
-  border-radius: 999px 0 0 999px;
   background: transparent;
   color: var(--text);
   font: inherit;
-  font-size: var(--text-sm);
+  text-align: left;
   cursor: pointer;
+}
+
+.shell-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
 }
 
 .shell-dot {
@@ -3248,16 +3384,73 @@ button.dev-server-chip:focus-visible {
   background: var(--border-strong);
 }
 
-.shell-chip[data-running='true'] .shell-dot {
+.shell-row[data-running='true'] .shell-dot {
   background: #3fb950;
   box-shadow: 0 0 0 3px color-mix(in srgb, #3fb950 22%, transparent);
 }
 
 .shell-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.shell-command {
+/* What a shell is: a terminal or a trigger. */
+.shell-type-icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--text-muted);
+}
+
+/* A trigger's status, where a shell has its dot: 14 px wide so names line up. */
+.trigger-status {
+  flex: none;
+  width: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.trigger-status .shell-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--border-strong);
+}
+
+.trigger-status .status-icon-running::before {
+  margin: 0;
+}
+
+.trigger-status[data-status='running'] {
+  color: var(--pill-working-text);
+}
+
+.trigger-status[data-status='running'] svg {
+  animation: status-icon-spin 1s linear infinite;
+}
+
+.trigger-status[data-status='done'] {
+  color: #3fb950;
+}
+
+.trigger-status[data-status='failed'] {
+  color: var(--danger);
+}
+
+/* A shell's dot in the same 14 px column as a trigger's status. */
+.shell-row-head > .shell-dot {
+  margin: 0 3.5px;
+}
+
+.shell-marker {
+  flex: none;
+  display: inline-flex;
+  color: var(--text-muted);
+}
+
+.shell-command,
+.shell-where {
+  padding-left: var(--shell-indent);
   overflow: hidden;
   color: var(--text-muted);
   font-family: var(--font-mono);
@@ -3266,23 +3459,114 @@ button.dev-server-chip:focus-visible {
   white-space: nowrap;
 }
 
-.shell-menu-wrap .icon-btn {
+.shell-where {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* In a worktree: the branch in the accent colour; the workspace's folder stays muted. */
+.shell-where[data-worktree='true'] {
+  color: var(--accent);
+}
+
+.shell-where svg {
+  flex: none;
+}
+
+.shell-where-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.shell-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.shell-row-actions .icon-btn {
   width: 24px;
   height: 24px;
-  margin-right: 2px;
-  border-radius: 999px;
 }
 
-/* A shell's dev server chips (#49 D7), at the end of its pill, after its menu. */
-.shell-chip-wrap .dev-servers {
-  flex-wrap: nowrap;
-  margin: 0;
-  padding: 0 var(--space-2) 0 0;
+/* A shell's Start or Stop, joined to the dropdown that picks where it runs (a worktree or the
+   workspace folder). A shell that can't move has the main half alone. */
+.split-btn {
+  display: inline-flex;
+  align-items: stretch;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
 }
 
-.shells-add {
-  border: 1px dashed var(--border);
-  border-radius: 999px;
+.split-btn-main,
+.split-btn-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  min-width: 24px;
+  padding: 0 5px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.split-btn-main {
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+
+.split-btn-single .split-btn-main {
+  border-radius: var(--radius-sm);
+}
+
+.split-btn-main[data-worktree='true'] {
+  color: var(--accent);
+}
+
+.split-btn-menu {
+  display: flex;
+}
+
+.split-btn-toggle {
+  min-width: 18px;
+  padding: 0 3px;
+  border-left: 1px solid var(--border);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.split-btn-main:hover,
+.split-btn-toggle:hover,
+.split-btn-toggle[aria-expanded='true'] {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* A shell's dev server chips (#49 D7), under its row. */
+.shell-row .dev-servers {
+  grid-column: 1 / -1;
+  grid-row: auto;
+  margin-top: 4px;
+  padding: 0 0 0 var(--shell-indent);
+}
+
+/* How many shells run, on the Shells tab. */
+.side-panel-tab-count {
+  display: inline-block;
+  min-width: 16px;
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--chip);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
 }
 
 .card-tag-shell {
