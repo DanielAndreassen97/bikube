@@ -16,8 +16,13 @@ import {
   X,
   Zap
 } from 'lucide-react'
-import { useRef, useState } from 'react'
-import { triggerStatus, triggerStatusLabel, type TriggerStatus } from '../../core/trigger-status'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  failureHeading,
+  triggerStatus,
+  triggerStatusLabel,
+  type TriggerStatus
+} from '../../core/trigger-status'
 import { shellCards, shellWorktreeCard } from '../../core/workspace-shells'
 import { defaultShellId, type Card, type Workspace } from '../../core/workspace-store'
 import { startInBackground } from './background-shells'
@@ -29,7 +34,9 @@ import DevServerChips from './DevServerChips'
 import { useDevServers } from './dev-servers'
 import { MENU_ICON, SMALL_ICON } from './icons'
 import MenuButton from './MenuButton'
+import Modal from './Modal'
 import ShellDialog from './ShellDialog'
+import { useTriggerFailureRequest } from './trigger-failures'
 import StatusIcon from './StatusIcon'
 import { workspaceStore } from './store'
 
@@ -150,6 +157,7 @@ function ShellRow({
   const trigger = named?.type === 'trigger'
   const startsHidden = trigger && !running
   const command = shell.startup.kind === 'custom' ? shell.startup.command : ''
+  const status = trigger ? triggerStatus(runState, listening) : null
   const where = shellWorktreeCard(workspace, named)
   // Worktree cards a named shell can run in (local workspaces only).
   const worktreeCards =
@@ -186,7 +194,7 @@ function ShellRow({
       >
         <span className="shell-row-head">
           {trigger ? (
-            <TriggerStatusIcon status={triggerStatus(runState, listening)} />
+            <TriggerStatusIcon status={status ?? { kind: 'idle' }} />
           ) : (
             <span className="shell-dot" aria-hidden="true" />
           )}
@@ -434,6 +442,15 @@ function ShellRow({
         </span>
       )}
       {running && <DevServerChips cardId={shell.id} />}
+      {status?.kind === 'failed' && (
+        <TriggerFailure
+          title={shell.title}
+          command={command}
+          status={status}
+          shellId={shell.id}
+          onRunAgain={() => startInBackground(workspace.id, shell.id)}
+        />
+      )}
       {deleting && (
         <ConfirmDialog
           title="Delete shell"
@@ -447,6 +464,117 @@ function ShellRow({
         />
       )}
     </li>
+  )
+}
+
+/**
+ * A failed trigger under its row: its last line, a click (or its notification's) opening what it
+ * printed in a dialog, scrolled to the end, with Copy and Run again (its shell, and so its screen,
+ * is gone once the command ends).
+ */
+function TriggerFailure({
+  title,
+  command,
+  status,
+  shellId,
+  onRunAgain
+}: {
+  title: string
+  command: string
+  status: Extract<TriggerStatus, { kind: 'failed' }>
+  shellId: string
+  onRunAgain: () => void
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const output = useRef<HTMLPreElement>(null)
+  const heading = failureHeading(status)
+  // Each opening starts with Copy, not Copied.
+  const show = useCallback(() => {
+    setCopied(false)
+    setOpen(true)
+  }, [])
+  useTriggerFailureRequest(shellId, show)
+  // The error is usually at the end.
+  useEffect(() => {
+    if (open && output.current) output.current.scrollTop = output.current.scrollHeight
+  }, [open])
+  return (
+    <div className="trigger-failure" data-testid="trigger-failure">
+      <button
+        type="button"
+        className="trigger-failure-toggle"
+        data-testid="trigger-failure-toggle"
+        title="Show output"
+        onClick={show}
+      >
+        <span className="trigger-failure-line" data-testid="trigger-failure-line">
+          {status.line || heading}
+        </span>
+      </button>
+      {open && (
+        <Modal
+          title={`${title}: ${heading}`}
+          onClose={() => setOpen(false)}
+          testId="trigger-failure-dialog"
+          className="modal-output"
+          closeOnOutsideClick
+        >
+          {command && (
+            <p className="trigger-failure-command" data-testid="trigger-failure-command">
+              {command}
+            </p>
+          )}
+          {status.tail.length > 0 ? (
+            <pre
+              ref={output}
+              className="trigger-failure-output"
+              data-testid="trigger-failure-output"
+            >
+              {status.tail.join('\n')}
+            </pre>
+          ) : (
+            <p className="modal-message" data-testid="trigger-failure-empty">
+              It printed nothing.
+            </p>
+          )}
+          <div className="modal-actions">
+            {status.tail.length > 0 && (
+              <button
+                type="button"
+                className="btn"
+                data-testid="trigger-failure-copy"
+                onClick={() => {
+                  void window.drovr.clipboard.write(status.tail.join('\n'))
+                  setCopied(true)
+                }}
+              >
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+            )}
+            <button
+              type="button"
+              className="btn"
+              data-testid="trigger-failure-close"
+              onClick={() => setOpen(false)}
+            >
+              Close
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              data-testid="trigger-failure-run"
+              onClick={() => {
+                setOpen(false)
+                onRunAgain()
+              }}
+            >
+              Run again
+            </button>
+          </div>
+        </Modal>
+      )}
+    </div>
   )
 }
 

@@ -11,6 +11,7 @@ import {
   cardStatus,
   isShellExitLine,
   lastOutputLine,
+  outputTail,
   type CardRunState,
   type CardStatus,
   type SetupState
@@ -35,10 +36,11 @@ export interface CardScreen {
   onInput(listener: (data: string) => void): void
   onResize(listener: (size: { cols: number; rows: number }) => void): void
   /**
-   * The visible screen's lines (bottom of scrollback) and the cursor's row in them. Rows above
-   * the one `markSessionStart` marked read as blank.
+   * The visible screen's lines (bottom of scrollback) and the cursor's row in them, or with
+   * `withScrollback` every line from the top of the scrollback. Rows above the one
+   * `markSessionStart` marked read as blank.
    */
-  screen(): { lines: string[]; cursorRow: number }
+  screen(withScrollback?: boolean): { lines: string[]; cursorRow: number }
   /**
    * Everything above the cursor's row is a previous run's restored output (#46 D5a, D9): from
    * now on `screen()` reads those rows as blank, so the status reads only this session's rows.
@@ -128,6 +130,8 @@ interface Entry<S> {
   host: string | undefined
   /** The current start exits after its command: its own exit gives a `CommandExit`. */
   exitsAfterCommand: boolean
+  /** The line typed for such a start, where its output begins on the screen. */
+  commandLine: string | null
   /** Fed each output chunk while an SSH card's start line waits for the ready marker (#12 D6). */
   watch: ((data: string) => void) | null
 }
@@ -189,6 +193,7 @@ export class CardSessions<S extends CardScreen> {
       closed: false,
       host: card.host,
       exitsAfterCommand: card.exitAfterStartup === true,
+      commandLine: null,
       watch: null
     }
     if (existing) {
@@ -235,6 +240,7 @@ export class CardSessions<S extends CardScreen> {
     entry.closed = false
     entry.host = card.host
     entry.exitsAfterCommand = card.exitAfterStartup === true
+    entry.commandLine = line
     entry.watch = null
     this.outputWatcher?.ended(card.id)
     this.setState(entry, state)
@@ -514,7 +520,10 @@ export class CardSessions<S extends CardScreen> {
       if (keeper) this.save(cardId, screen, keeper)
       const { lines, cursorRow } = screen.screen()
       if (reportsExit) {
-        const exit = { code: exitCode, line: lastOutputLine(lines, cursorRow, isShellExitLine) }
+        // Only what the command printed: never its prompt or what the shell printed before.
+        const all = screen.screen(true)
+        const tail = outputTail(all.lines, all.cursorRow, entry.commandLine, isShellExitLine)
+        const exit = { code: exitCode, line: tail.at(-1)?.trim() ?? '', tail }
         return this.stopped(cardId, entry, { kind: 'stopped', exit })
       }
       if (!sshFailed) return this.stopped(cardId, entry, { kind: 'stopped' })
