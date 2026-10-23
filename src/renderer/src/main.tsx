@@ -3,6 +3,7 @@ import './assets/main.css'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import { applyLaunchAppTheme, followAppTheme } from './app-theme'
 import { startAttention } from './attention'
 import { startAutoMoves } from './auto-move'
 import { startInstalledAgents } from './installed-agents'
@@ -13,6 +14,9 @@ import { loadSettingsStore } from './settings'
 import { loadSymbolsFont } from './symbols-font'
 import { loadWorkspaceStore } from './store'
 import { listenForSyncBoards, loadSyncStatus, receiveSyncBoards } from './sync'
+
+// The App theme before anything else, so the first paint already shows it (#64 D7).
+applyLaunchAppTheme()
 
 // Boards from the sync folder are received from the start, so one sent while loading isn't lost.
 receiveSyncBoards()
@@ -28,6 +32,7 @@ void Promise.all([
   loadSymbolsFont(),
   loadHomeDir()
 ]).then(() => {
+  followAppTheme()
   listenForBoardRequests()
   listenForSyncBoards()
   startAttention()

@@ -10,6 +10,7 @@ import {
   splitRight,
   zoomPane
 } from './card-view'
+import { bodyBackground, pickAppTheme } from './app-theme'
 import { clipboardWrites, recordClipboardWrites } from './clipboard-writes'
 import { launchApp, newDataDir, removeDataDirs } from './launch'
 import { plainCards } from './plain-cards'
@@ -938,4 +939,246 @@ test('#60 AC6: Copy command output shows its default, can be recorded to a key t
   await expect(dialog(page)).toHaveCount(0)
   await page.keyboard.press(darwin ? 'Meta+Shift+A' : 'Control+Shift+A')
   await expect.poll(() => clipboardWrites(app!)).toEqual(['copied', 'copied'])
+})
+
+const accent = (page: Page): Promise<string> =>
+  page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()
+  )
+
+test('#64 AC3: with no app theme the board keeps Default, dark and light', async () => {
+  const dataDir = newDataDir()
+  writeFileSync(
+    join(dataDir, 'bikube-settings.json'),
+    '{"version":1,"settings":{"theme":"dark","fontSize":13,"fontFamily":"Menlo, Consolas, monospace","shell":"","terminalThemeDark":"Bikube Dark","terminalThemeLight":"Bikube Light","useGhosttyTheme":false}}'
+  )
+  const launched = await launchApp({ dataDir })
+  app = launched.app
+  const { page } = launched
+  await followNativeTheme(page)
+  await expect.poll(() => bodyBackground(page)).toBe('rgb(20, 21, 26)')
+  expect(await accent(page)).toBe('#6d8dfa')
+
+  await page.keyboard.press(SHORTCUT)
+  await dialog(page).getByRole('radio', { name: 'Light' }).check()
+  await expect.poll(() => bodyBackground(page)).toBe('rgb(246, 247, 249)')
+  expect(await accent(page)).toBe('#3d63dd')
+})
+
+test('#64 AC5: a saved Bikube theme is the window background and the first paint', async () => {
+  const dataDir = newDataDir()
+  writeFileSync(
+    join(dataDir, 'bikube-settings.json'),
+    '{"version":1,"settings":{"theme":"dark","appTheme":"bikube","fontSize":13,"fontFamily":"Menlo, Consolas, monospace","shell":"","terminalThemeDark":"Bikube Dark","terminalThemeLight":"Bikube Light","useGhosttyTheme":false}}'
+  )
+  const launched = await launchApp({ dataDir })
+  app = launched.app
+  const { page } = launched
+  const background = await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0]!.getBackgroundColor()
+  )
+  expect(background.toLowerCase()).toBe('#17140f')
+  // The theme was in place before the page's first paint, so no paint showed Default.
+  const timing = await page.evaluate(() => ({
+    applied: performance.getEntriesByName('bikube:app-theme')[0]?.startTime ?? null,
+    painted: performance.getEntriesByName('first-paint')[0]?.startTime ?? null
+  }))
+  expect(timing.applied).not.toBeNull()
+  expect(timing.painted).not.toBeNull()
+  expect(timing.applied!).toBeLessThanOrEqual(timing.painted!)
+  // The renderer took over the preload's style element rather than adding a second one.
+  expect(
+    await page.evaluate(() =>
+      [...document.querySelectorAll('style[data-app-theme]')].map((s) =>
+        s.getAttribute('data-app-theme')
+      )
+    )
+  ).toEqual(['bikube'])
+  await followNativeTheme(page)
+  expect(await bodyBackground(page)).toBe('rgb(23, 20, 15)')
+})
+
+test('#64 AC7: changing the app theme leaves the running terminal theme and pane background', async () => {
+  const dataDir = newDataDir()
+  writeFileSync(
+    join(dataDir, 'bikube-settings.json'),
+    '{"version":1,"settings":{"theme":"light","fontSize":13,"fontFamily":"Menlo, Consolas, monospace","shell":"","terminalThemeDark":"Bikube Dark","terminalThemeLight":"Dracula","useGhosttyTheme":false}}'
+  )
+  const launched = await launchApp({ dataDir })
+  app = launched.app
+  const { page } = launched
+  await followNativeTheme(page)
+  await alphaWithApi(page)
+  const terminalTheme = (): Promise<string> =>
+    page.evaluate(() => {
+      const host = document.querySelector('[data-testid=card-view] [data-testid=terminal]') as
+        (HTMLElement & { __xterm?: { options: { theme: unknown } } }) | null
+      return JSON.stringify(host?.__xterm?.options.theme ?? null)
+    })
+  await expect.poll(() => openLook(page)).toMatchObject({ background: '#282a36' })
+  const before = { theme: await terminalTheme(), pane: await terminalBackground(page) }
+  expect(before.pane).toBe('rgb(40, 42, 54)')
+
+  await pickAppTheme(page, 'Gruvbox')
+  // Gruvbox light's bg0.
+  await expect.poll(() => bodyBackground(page)).toBe('rgb(251, 241, 199)')
+  expect({ theme: await terminalTheme(), pane: await terminalBackground(page) }).toEqual(before)
+  await expectStatusOnBoard(page, 'api', 'Running')
+})
+
+/** The background of app theme `id`'s preview in the App theme picker. */
+const previewBackground = (page: Page, id: string): Promise<string> =>
+  dialog(page)
+    .getByTestId(`app-theme-${id}`)
+    .locator('.app-theme-preview')
+    .evaluate((el) => getComputedStyle(el).backgroundColor)
+
+test('#64 AC4: clicking the Catppuccin tile applies Mocha at once and saves it; Light shows Latte', async () => {
+  const dataDir = newDataDir()
+  const launched = await launchApp({ dataDir })
+  app = launched.app
+  const { page } = launched
+  await followNativeTheme(page)
+  await page.keyboard.press(SHORTCUT)
+  await dialog(page).getByRole('radio', { name: 'Dark' }).check()
+  await expect.poll(() => bodyBackground(page)).toBe('rgb(20, 21, 26)')
+  // The previews show the dark versions: Mocha's base.
+  await expect.poll(() => previewBackground(page, 'catppuccin')).toBe('rgb(30, 30, 46)')
+
+  await dialog(page).getByTestId('app-theme-catppuccin').click()
+  await expect.poll(() => bodyBackground(page)).toBe('rgb(30, 30, 46)')
+  await expect(dialog(page).getByRole('radio', { name: 'Catppuccin' })).toBeChecked()
+  await expect
+    .poll(() =>
+      existsSync(join(dataDir, 'bikube-settings.json')) ? readSettingsFile(dataDir) : ''
+    )
+    .toContain('"appTheme":"catppuccin"')
+
+  await dialog(page).getByRole('radio', { name: 'Light' }).check()
+  await expect.poll(() => bodyBackground(page)).toBe('rgb(239, 241, 245)')
+  // Latte's base and Gruvbox light's bg0.
+  await expect.poll(() => previewBackground(page, 'catppuccin')).toBe('rgb(239, 241, 245)')
+  expect(await previewBackground(page, 'gruvbox')).toBe('rgb(251, 241, 199)')
+  await expect(dialog(page).getByRole('radio', { name: 'Catppuccin' })).toBeChecked()
+})
+
+test('#64 AC8: the App theme tiles are one radio group; Tab enters it and Right picks the next', async () => {
+  const launched = await launchApp()
+  app = launched.app
+  const { page } = launched
+  await page.keyboard.press(SHORTCUT)
+  const group = dialog(page).getByRole('radiogroup', { name: 'App theme' })
+  await expect(group).toBeVisible()
+  await expect(group.getByRole('radio')).toHaveCount(6)
+  const names = await group
+    .getByRole('radio')
+    .evaluateAll((radios) => radios.map((r) => (r as HTMLInputElement).labels?.[0]?.textContent))
+  expect(names).toEqual(['Default', 'Bikube', 'Catppuccin', 'Rosé Pine', 'Nord', 'Gruvbox'])
+  for (const name of names) {
+    await expect(group.getByRole('radio', { name: name!, exact: true })).toHaveCount(1)
+  }
+  await expect(group.getByRole('radio', { name: 'Default', exact: true })).toBeChecked()
+
+  // Settings opens on the Theme row's checked radio; Tab moves into the App theme group.
+  await expect(dialog(page).getByRole('radio', { name: 'System' })).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(group.getByRole('radio', { name: 'Default', exact: true })).toBeFocused()
+  await page.keyboard.press('ArrowRight')
+  const bikube = group.getByRole('radio', { name: 'Bikube', exact: true })
+  await expect(bikube).toBeChecked()
+  await expect(bikube).toBeFocused()
+  // Bikube light's background (Playwright pins a light colour scheme).
+  await expect.poll(() => bodyBackground(page)).toBe('rgb(250, 245, 234)')
+  // Tab leaves the group for the next control.
+  await page.keyboard.press('Tab')
+  await expect(bikube).not.toBeFocused()
+  expect(await page.evaluate(() => document.activeElement?.getAttribute('type'))).not.toBe('radio')
+})
+
+/**
+ * Each Settings row in the shown section, as where its label sits from its control: `above`,
+ * `beside` or `overlapping`, with the row's label text.
+ */
+function rowLayouts(page: Page): Promise<{ label: string; layout: string }[]> {
+  return dialog(page).evaluate((root) =>
+    [...root.querySelectorAll('[role=tabpanel] .settings-row')].flatMap((row) => {
+      const label = row.querySelector(':scope > .settings-label')
+      const control = [...row.children].find((child) => child !== label)
+      if (!label || !control) return []
+      const l = label.getBoundingClientRect()
+      const c = control.getBoundingClientRect()
+      const layout =
+        l.bottom <= c.top + 1
+          ? 'above'
+          : l.right <= c.left + 1 && l.top < c.bottom
+            ? 'beside'
+            : 'overlapping'
+      return [{ label: label.textContent ?? '', layout }]
+    })
+  )
+}
+
+/** Whether the dialog or its section panel scrolls sideways. */
+const scrollsSideways = (page: Page): Promise<boolean> =>
+  dialog(page).evaluate((root) =>
+    [root, root.querySelector('[role=tabpanel]')!].some((el) => el.scrollWidth > el.clientWidth)
+  )
+
+test('#64 AC8b: in a 400 px window each Settings row stacks its label above a full-width control', async () => {
+  const launched = await launchApp()
+  app = launched.app
+  const { page } = launched
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(400, 700))
+  await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(400)
+  await page.keyboard.press(SHORTCUT)
+  await expect(dialog(page)).toBeVisible()
+
+  const layouts = await rowLayouts(page)
+  expect(layouts.length).toBeGreaterThan(3)
+  for (const { label, layout } of layouts) expect(layout, label).toBe('above')
+  const grid = await dialog(page).getByRole('radiogroup', { name: 'App theme' }).boundingBox()
+  expect(grid!.width).toBeGreaterThanOrEqual(200)
+  const theme = await dialog(page)
+    .getByRole('group', { name: 'Theme', exact: true })
+    .locator('.segmented')
+    .boundingBox()
+  expect(theme!.width).toBeGreaterThanOrEqual(200)
+  expect(await scrollsSideways(page)).toBe(false)
+
+  // The sections are an icon rail, each tab's name its tooltip.
+  const tabs = dialog(page).getByRole('tab')
+  for (let i = 0; i < (await tabs.count()); i++) {
+    expect(await tabs.nth(i).getAttribute('title')).toBe(await tabs.nth(i).textContent())
+    const label = await tabs.nth(i).locator('.settings-tab-label').boundingBox()
+    expect(label!.width).toBeLessThanOrEqual(1)
+  }
+
+  // Every other section stacks too, with nothing scrolling sideways.
+  for (let i = 1; i < (await tabs.count()); i++) {
+    await tabs.nth(i).click()
+    const name = await tabs.nth(i).getAttribute('data-section')
+    for (const { label, layout } of await rowLayouts(page)) {
+      expect(layout, `${name}: ${label}`).toBe('above')
+    }
+    expect(await scrollsSideways(page), name!).toBe(false)
+  }
+
+  // At 320 px nothing scrolls sideways either, every Theme choice whole.
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(320, 700))
+  await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(320)
+  await dialog(page).getByTestId('settings-section-appearance').click()
+  expect(await scrollsSideways(page)).toBe(false)
+  const segments = await dialog(page)
+    .getByRole('group', { name: 'Theme', exact: true })
+    .locator('.radio')
+    .evaluateAll((labels) => labels.map((l) => l.scrollWidth <= l.clientWidth))
+  expect(segments).toEqual([true, true, true])
+
+  // At 1000 px the label sits beside its control, as before.
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1000, 700))
+  await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(1000)
+  await dialog(page).getByTestId('settings-section-appearance').click()
+  for (const { label, layout } of await rowLayouts(page)) expect(layout, label).toBe('beside')
+  const wideLabel = await tabs.first().locator('.settings-tab-label').boundingBox()
+  expect(wideLabel!.width).toBeGreaterThan(20)
 })

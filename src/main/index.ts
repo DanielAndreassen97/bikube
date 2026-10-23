@@ -1,6 +1,7 @@
 import { app, BrowserWindow } from 'electron'
 import { join } from 'node:path'
 import { hostname } from 'node:os'
+import { appThemeArg } from '../core/app-themes'
 import { boundedWait } from '../core/bounded-wait'
 import { killAtQuit, quitHold } from '../core/quit-hold'
 import { longCommandMsArg } from '../core/long-commands'
@@ -77,8 +78,10 @@ function createWindow(settings: MainSettings): void {
       sandbox: true,
       ...(hiddenForTests && { backgroundThrottling: false }),
       // This machine's host name, which the sandboxed renderer can't read (#45 D8).
+      // The App theme, applied before the page's first paint (#64 D7).
       additionalArguments: [
         hostNameArg(hostname()),
+        appThemeArg(settings.appTheme()),
         ...(longCommandMs ? [longCommandMsArg(longCommandMs)] : [])
       ]
     }

@@ -63,6 +63,7 @@ import ShortcutKeys from './ShortcutKeys'
 import { settingsStore, useSettings } from './settings'
 import TerminalPreview from './TerminalPreview'
 import ThemePicker from './ThemePicker'
+import AppThemePicker from './AppThemePicker'
 import { useSyncStatus } from './sync'
 
 export const SYNC_FOLDER_ERROR = 'Folder not found'
@@ -185,10 +186,11 @@ function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.Element
               aria-selected={section === key}
               aria-controls={panelId}
               tabIndex={section === key ? 0 : -1}
+              title={label}
               onClick={() => setSection(key)}
             >
               <Icon {...ICON} />
-              {label}
+              <span className="settings-tab-label">{label}</span>
             </button>
           ))}
         </div>
@@ -231,9 +233,10 @@ function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.Element
 }
 
 /**
- * Appearance: the app theme, and the terminals' font size (typed, or stepped with the buttons and
- * the arrow keys) and family (applied on blur or Enter, empty means the default). The family's
- * draft lives in the dialog, so closing from another section still applies it.
+ * Appearance: the Theme (which version shows), the App theme (#64), and the terminals' font size
+ * (typed, or stepped with the buttons and the arrow keys) and family (applied on blur or Enter,
+ * empty means the default). The family's draft lives in the dialog, so closing from another
+ * section still applies it.
  */
 function AppearanceSection({
   family,
@@ -311,6 +314,10 @@ function AppearanceSection({
           })}
         </div>
       </fieldset>
+      <AppThemePicker
+        value={settings.appTheme}
+        onPick={(appTheme) => settingsStore.update({ appTheme })}
+      />
       <div className="settings-row">
         <label className="settings-label" htmlFor={sizeId}>
           Font size
