@@ -3,9 +3,11 @@ import './assets/main.css'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import { followAppFont } from './app-font'
 import { applyLaunchAppTheme, followAppTheme } from './app-theme'
 import { startAttention } from './attention'
 import { startAutoMoves } from './auto-move'
+import { startTemporaryShells } from './temporary-shells'
 import { startInstalledAgents } from './installed-agents'
 import { listenForBoardRequests } from './board-requests'
 import { loadGhosttyTheme } from './ghostty'
@@ -33,11 +35,13 @@ void Promise.all([
   loadHomeDir()
 ]).then(() => {
   followAppTheme()
+  followAppFont()
   listenForBoardRequests()
   listenForSyncBoards()
   startAttention()
   startInstalledAgents()
   startAutoMoves()
+  startTemporaryShells()
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <App />
