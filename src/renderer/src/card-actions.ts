@@ -3,13 +3,15 @@ import type { Workspace, Card } from '../../core/workspace-store'
 import type { FirstStart } from '../../core/startup-command'
 import { findShellCard, shellCards } from '../../core/workspace-shells'
 import { cardPanes, cardTerminals } from './card-terminals'
+import { forgetPendingWorktree, makePendingWorktree } from './pending-worktrees'
 import { settingsStore } from './settings'
 import { workspaceStore } from './store'
 import { clearCardUsage } from './usage'
 
 /**
  * Starts the card if its shell isn't running, with its current startup command (#5 D7, D8);
- * a running card is left as it is. Opening a card, and creating one, goes through here.
+ * a running card is left as it is. Opening a card, and creating one, goes through here, so a
+ * card with a pending worktree (#69 D10) gets it made first, by whichever path opens it.
  */
 export function startCard(workspaceId: string, cardId: string): void {
   const workspace = workspaceStore.getState().workspaces.find((w) => w.id === workspaceId)
@@ -17,10 +19,37 @@ export function startCard(workspaceId: string, cardId: string): void {
   const card =
     workspace?.cards.find((c) => c.id === cardId) ?? (workspace && findShellCard(workspace, cardId))
   if (!card) return
-  cardTerminals().start(card, recordFirstStart(workspaceId, cardId))
+  const start = (starting: Card): void =>
+    cardTerminals().start(starting, recordFirstStart(workspaceId, cardId))
+  if (
+    card.pendingWorktree &&
+    card.host === undefined &&
+    !card.worktree &&
+    cardTerminals().runState(cardId)?.kind !== 'running'
+  ) {
+    makePendingWorktree(workspaceId, card, start)
+    return
+  }
+  // A failed first open is over once the card has a worktree (moved or synced) or lost its
+  // pending one: the view must not keep its error and Retry.
+  if (!card.pendingWorktree || card.worktree) forgetPendingWorktree(cardId)
+  start(card)
 }
 
-/** Records that a board card was opened now, so the grid view shows it first; shells aren't. */
+/**
+ * Run in workspace folder (#69 D10): drops the card's pending worktree (saved and synced) and
+ * starts it in the workspace folder.
+ */
+export function runPendingInWorkspaceFolder(workspaceId: string, cardId: string): void {
+  workspaceStore.clearPendingWorktree(workspaceId, cardId)
+  startCard(workspaceId, cardId)
+  forgetPendingWorktree(cardId)
+}
+
+/**
+ * Records that a board card was opened now, so the grid view shows it first, and clears its New
+ * mark (#69 D11); shells aren't.
+ */
 export function markCardOpened(workspaceId: string, cardId: string): void {
   const workspace = workspaceStore.getState().workspaces.find((w) => w.id === workspaceId)
   if (workspace?.cards.some((c) => c.id === cardId)) {

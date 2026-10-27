@@ -12,7 +12,12 @@ import { createConnection, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { serializeRequest, type BoardReply, type BoardRequest } from './board-protocol'
+import {
+  MAX_REQUEST_LINE_BYTES,
+  serializeRequest,
+  type BoardReply,
+  type BoardRequest
+} from './board-protocol'
 import { DRAIN_MS, MAX_CONNECTIONS, startBoardServer, type BoardServer } from './board-server'
 
 let dir: string
@@ -139,7 +144,11 @@ describe('startBoardServer', () => {
   it.each([
     ['not JSON', 'hello\n', 'board: invalid request'],
     ['another version', '{"v":2}\n', 'board: invalid request'],
-    ['a line over 8 KB', `${'x'.repeat(9 * 1024)}\n`, 'board: request too long']
+    [
+      'a line over 512 KiB',
+      `${'x'.repeat(MAX_REQUEST_LINE_BYTES + 1024)}\n`,
+      'board: request too long'
+    ]
   ])(
     'answers %s with an error and closes, without calling the handler (#9 D6, AC10)',
     async (_, line, error) => {
@@ -154,11 +163,55 @@ describe('startBoardServer', () => {
     }
   )
 
+  it('hands a 100,000-character multi-byte describe to the handler whole (#69 AC14)', async () => {
+    const handler = vi.fn(async () => ({ ok: true }) as BoardReply)
+    await serve(handler)
+    const description = '🎉'.repeat(100_000)
+    const line = serializeRequest('c1', { command: 'describe', card: '.', description })
+    expect(await exchange(line)).toBe('{"ok":true}\n')
+    expect(handler).toHaveBeenCalledWith({
+      v: 1,
+      cardId: 'c1',
+      command: 'describe',
+      card: '.',
+      description
+    })
+  })
+
   it('answers an over-long line before its newline arrives (#9 D6)', async () => {
     await serve()
-    expect(await exchange('x'.repeat(20 * 1024))).toBe(
+    expect(await exchange('x'.repeat(MAX_REQUEST_LINE_BYTES + 20 * 1024))).toBe(
       '{"ok":false,"error":"board: request too long"}\n'
     )
+  })
+
+  it('counts UTF-8 bytes across many small chunks, characters split between them (#9 D6)', async () => {
+    const handler = vi.fn(async () => ({ ok: true }) as BoardReply)
+    await serve(handler)
+    /** Writes `data` in 4,097-byte pieces, so two-byte characters are cut in half. */
+    const chunked = (data: Buffer): Promise<string> =>
+      new Promise((resolve, reject) => {
+        const socket = createConnection(socketPath)
+        let received = ''
+        socket.setEncoding('utf8')
+        socket.on('data', (chunk: string) => (received += chunk))
+        socket.on('error', (error: NodeJS.ErrnoException) =>
+          error.code === 'ECONNRESET' || error.code === 'EPIPE' ? resolve(received) : reject(error)
+        )
+        socket.on('close', () => resolve(received))
+        for (let at = 0; at < data.length; at += 4097) socket.write(data.subarray(at, at + 4097))
+      })
+    // 'é' is two bytes: just over the limit in bytes, though under it in characters.
+    const over = Buffer.from('é'.repeat(MAX_REQUEST_LINE_BYTES / 2 + 1))
+    expect(await chunked(over)).toBe('{"ok":false,"error":"board: request too long"}\n')
+    expect(handler).not.toHaveBeenCalled()
+    // A describe at the limit, sent the same way, reaches the handler whole.
+    const empty = serializeRequest('c1', { command: 'describe', card: '.', description: '' })
+    const room = MAX_REQUEST_LINE_BYTES - (Buffer.byteLength(empty) - 1)
+    const description = 'é'.repeat(Math.floor(room / 2))
+    const line = serializeRequest('c1', { command: 'describe', card: '.', description })
+    expect(await chunked(Buffer.from(line))).toBe('{"ok":true}\n')
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ description }))
   })
 
   it('closes a connection that sends no full line in time (#9 D6)', async () => {

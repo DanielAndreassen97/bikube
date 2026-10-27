@@ -67,6 +67,8 @@ export function toSyncBoard(state: WorkspaceState, home: string): SyncBoard {
         id: c.id,
         columnId: c.columnId,
         title: c.title,
+        // The description travels like the title (#69 D1).
+        ...(c.description !== undefined && { description: c.description }),
         directory: dir(c.directory, c.host),
         ...(c.host !== undefined && { host: c.host }),
         // A worktree is on the machine that made it; another machine's card won't find it.
@@ -77,12 +79,16 @@ export function toSyncBoard(state: WorkspaceState, home: string): SyncBoard {
             repo: portableDirectory(c.worktree.repo, home)
           }
         }),
+        // Whichever machine opens the card first makes it (#69 D10).
+        ...(c.pendingWorktree && { pendingWorktree: { branch: c.pendingWorktree.branch } }),
         startup: startupCopy(c.startup),
         agentSessionId: c.agentSessionId,
         claudeStarted: c.host === undefined ? false : c.claudeStarted,
         startedAgents: c.host === undefined ? [] : [...c.startedAgents],
         // When it was opened is this machine's: every open would write the file.
-        ...(c.createdAt !== undefined && { createdAt: c.createdAt })
+        ...(c.createdAt !== undefined && { createdAt: c.createdAt }),
+        // The New mark is cleared by the first open on any machine (#69 D11).
+        ...(c.unopened && { unopened: true as const })
       })),
       nextCardNumber: w.nextCardNumber,
       defaultStartup: startupCopy(w.defaultStartup),
@@ -103,7 +109,9 @@ export function toSyncBoard(state: WorkspaceState, home: string): SyncBoard {
       // are ordinary moves.
       ...(w.autoMove !== undefined && { autoMove: autoMoveCopy(w.autoMove) }),
       // The view is the workspace's setting, as its logo is.
-      ...(w.view !== undefined && { view: w.view })
+      ...(w.view !== undefined && { view: w.view }),
+      // So is its Kanban sort (#69 D12); `lastOpenedAt`, which it reads, stays on each machine.
+      ...(w.sort !== undefined && { sort: w.sort })
     }))
   }
 }

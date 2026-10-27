@@ -5,10 +5,12 @@
 import { isAgentKind, type AgentKind } from './agent-presets'
 import { readAutoMove } from './auto-move'
 import { cleanAgentStatus } from './board-commands'
+import { isDescription } from './card-description'
 import { asUsage } from './board-protocol'
 import { checkHost, checkRemoteDirectory } from './ssh-location'
 import { checkStartup, type StartupCommand } from './startup-command'
 import { isWorkspaceLogo } from './workspace-logos'
+import { branchProblem } from './worktree-names'
 import {
   checkShell,
   checkWorktreeSetup,
@@ -137,7 +139,9 @@ function readWorkspace(raw: unknown): Workspace | string {
     shells,
     worktreeSetup: setup.value,
     ...(autoMove !== null && { autoMove }),
-    ...(isWorkspaceView(raw.view) && { view: raw.view })
+    ...(isWorkspaceView(raw.view) && { view: raw.view }),
+    // Missing is the manual order; anything but `recent` is too, dropping only the key (#69 D12).
+    ...(raw.sort === 'recent' && { sort: 'recent' as const })
   }
 }
 
@@ -190,9 +194,13 @@ function readCard(raw: unknown): Card | string {
     id,
     columnId,
     title,
+    // A bad description is dropped, as if the card had none (#69 D1).
+    ...(isDescription(raw.description) && { description: raw.description }),
     directory,
     ...host,
     ...worktree,
+    // A bad one, or one on an SSH card or a worktree card, is dropped (#69 D10).
+    ...readPendingWorktree(raw.pendingWorktree, host.host, worktree),
     startup,
     agentSessionId,
     claudeStarted,
@@ -200,6 +208,8 @@ function readCard(raw: unknown): Card | string {
     ...setup,
     ...(isTime(raw.createdAt) && { createdAt: raw.createdAt }),
     ...(isTime(raw.lastOpenedAt) && { lastOpenedAt: raw.lastOpenedAt }),
+    // Anything but true is dropped, as if the card had no New mark (#69 D11).
+    ...(raw.unopened === true && { unopened: true as const }),
     ...readLastSeen(raw)
   }
 }
@@ -216,6 +226,18 @@ function readLastSeen(raw: Record<string, unknown>): Pick<Card, 'lastStatus' | '
     ...(status !== undefined && { lastStatus: status }),
     ...(usage && usage.tokens > 0 && { lastUsage: usage })
   }
+}
+
+/** `{ pendingWorktree }` for a local card without a worktree and a valid branch; else `{}`. */
+function readPendingWorktree(
+  raw: unknown,
+  host: string | undefined,
+  worktree: { worktree?: unknown }
+): { pendingWorktree?: { branch: string } } {
+  if (host !== undefined || worktree.worktree !== undefined || !isObject(raw)) return {}
+  const { branch } = raw
+  if (typeof branch !== 'string' || branchProblem(branch) !== null) return {}
+  return { pendingWorktree: { branch } }
 }
 
 /** A time in ms since the epoch; anything else is dropped, as if the card had none. */

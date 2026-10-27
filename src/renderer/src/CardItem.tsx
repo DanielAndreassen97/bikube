@@ -1,6 +1,7 @@
 import { ToolIcon } from './AgentLogo'
 import {
   AppWindow,
+  FileText,
   FolderX,
   GitBranch,
   GitMerge,
@@ -15,11 +16,14 @@ import {
   X
 } from 'lucide-react'
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { ACTIVITY_LABELS } from '../../core/activity'
 import { AGENT_PRESETS } from '../../core/agent-presets'
 import { compactStatus, type CardStatus } from '../../core/card-status'
+import { cardDatesTooltip } from '../../core/card-dates'
 import { cardMoveKey } from '../../core/card-moves'
 import { cardDeleteConfirmation } from '../../core/card-deletes'
+import { descriptionTooltip } from '../../core/card-description'
 import type { StartupCommand } from '../../core/startup-command'
 import type { Card, CardWorktree, Column } from '../../core/workspace-store'
 import { refreshBranch, useBranch } from './branches'
@@ -27,6 +31,7 @@ import { dismissCardGitAction, runCardGitAction, useCardGitAction } from './card
 import { refreshPullRequest, usePullRequest } from './pull-requests'
 import CardLines from './CardLines'
 import CloseCardDialog from './CloseCardDialog'
+import DescriptionDialog from './DescriptionDialog'
 import DevServerChips from './DevServerChips'
 import ConfirmDialog from './ConfirmDialog'
 import InlineInput from './InlineInput'
@@ -52,6 +57,7 @@ import { CARD_DRAG_TYPE, endCardDrag, startCardDrag } from './card-drag'
 import { cardTerminals, useCardRunState, useCardStatus } from './card-terminals'
 import { openCardWindow, useInWindow } from './card-windows'
 import { workspaceStore } from './store'
+import { useViewWindow } from './view-window'
 import { useCardUsage } from './usage'
 
 /**
@@ -306,7 +312,7 @@ interface CardItemProps {
 /**
  * A card on the board (#4 D5, D7, D9, D12, D13): its title and status; click or Enter opens
  * it. Its ⋯ menu renames it inline (as does double-clicking the title), changes its startup
- * command (#5 D11), moves it to the bottom of another column (#6 D8), closes it while it runs
+ * command (#5 D11), edits its description (#69 D4), moves it to the bottom of another column (#6 D8), closes it while it runs
  * (#7 D3, D4), retries or skips a setup that is running or failed (#39 D6), or deletes it, asking first while its process runs. Alt+arrows move it (#6 D7); its body drags it to another place
  * on the board, dimmed meanwhile (#6 D5). A running card's stop button opens the same Close
  * confirmation (#31 D10). Its menu also opens it in its own window, or brings that window forward
@@ -320,6 +326,7 @@ function CardItem({
   movable = true,
   onOpen
 }: CardItemProps): React.JSX.Element {
+  const view = useViewWindow()
   const status = useCardStatus(card.id)
   const running = useCardRunState(card.id).kind === 'running'
   const usage = useCardUsage(card.id)
@@ -327,10 +334,12 @@ function CardItem({
   const [renaming, setRenaming] = useState(false)
   const [confirm, setConfirm] = useState<string | null>(null)
   const [editingStartup, setEditingStartup] = useState(false)
+  const [editingDescription, setEditingDescription] = useState(false)
   const [closing, setClosing] = useState(false)
   // A card that stops by itself while its Close dialog is open has nothing left to close.
   if (closing && !running) setClosing(false)
   const [dragging, setDragging] = useState(false)
+  const [datesNow, setDatesNow] = useState(Date.now)
   const dragActive = useRef(false)
   const titleRef = useRef<HTMLSpanElement>(null)
   const openRef = useRef<HTMLButtonElement>(null)
@@ -455,6 +464,9 @@ function CardItem({
           className="card-body card-open"
           data-testid="card-open"
           aria-label={`Open ${card.title}`}
+          // When it was created and last opened here (#69 D13), as of the pointer coming to rest.
+          title={cardDatesTooltip(card, datesNow)}
+          onPointerEnter={() => setDatesNow(Date.now())}
           draggable={movable}
           onDragStart={movable ? onDragStart : undefined}
           onDragEnd={movable ? onDragEnd : undefined}
@@ -473,8 +485,40 @@ function CardItem({
               >
                 {card.title}
               </span>
+              {card.description !== undefined && (
+                // Its first lines as tooltip (#69 D4); never rendered as markdown.
+                <span
+                  className="card-description-icon"
+                  data-testid="card-description"
+                  title={descriptionTooltip(card.description)}
+                >
+                  <FileText {...SMALL_ICON} />
+                  <span className="visually-hidden">Has a description</span>
+                </span>
+              )}
+              {card.unopened && (
+                // Made by `board create` from another workspace, until its first open (#69 D11).
+                <span
+                  className="card-new"
+                  data-testid="card-new"
+                  title="Added from another workspace; opening it clears this"
+                >
+                  New
+                </span>
+              )}
             </span>
             {card.worktree && <WorktreeBranch branch={card.worktree.branch} worktree />}
+            {card.pendingWorktree && !card.worktree && (
+              // Made at its first open on any machine (#69 D10).
+              <span
+                className="card-branch card-branch-worktree"
+                data-testid="card-pending-worktree"
+                title={`Gets its own worktree on ${card.pendingWorktree.branch} when first opened`}
+              >
+                <TreePine {...SMALL_ICON} />
+                <span className="card-branch-name">Worktree on first open</span>
+              </span>
+            )}
           </span>
           <CardLines
             status={status}
@@ -554,6 +598,19 @@ function CardItem({
             >
               <SquareTerminal {...MENU_ICON} />
               Startup command…
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="menu-item"
+              data-testid="card-menu-description"
+              onClick={run(() => {
+                cancelPendingOpen()
+                setEditingDescription(true)
+              })}
+            >
+              <FileText {...MENU_ICON} />
+              Edit description…
             </button>
             <button
               type="button"
@@ -664,61 +721,81 @@ function CardItem({
           </>
         )}
       </MenuButton>
-      {editingStartup && (
-        <StartupDialog
-          workspaceId={workspaceId}
-          card={card}
-          onClose={() => setEditingStartup(false)}
-        />
-      )}
-      {closing && (
-        <CloseCardDialog cardId={card.id} title={card.title} onDone={() => setClosing(false)} />
-      )}
-      {confirm && (
-        <ConfirmDialog
-          title="Delete card"
-          message={confirm}
-          confirmLabel="Delete"
-          onCancel={() => setConfirm(null)}
-          onConfirm={() => {
-            setConfirm(null)
-            removeCard(workspaceId, card.id)
-          }}
-        />
-      )}
-      {movingToWorktree && (
-        <MoveToWorktreeDialog
-          workspaceId={workspaceId}
-          card={card}
-          onDone={() => setMovingToWorktree(false)}
-        />
-      )}
-      {removingWorktree && card.worktree && (
-        <RemoveWorktreeDialog
-          workspaceId={workspaceId}
-          card={{ ...card, worktree: card.worktree }}
-          onDone={() => setRemovingWorktree(false)}
-        />
-      )}
-      {merging && card.worktree && (
-        <MergeCardDialog
-          worktree={card.worktree}
-          choice={merging}
-          onMerge={() => merge(merging)}
-          onCancel={() => setMerging(null)}
-        />
-      )}
-      {deletingWorktree && card.worktree && (
-        <DeleteWorktreeCardDialog
-          card={{ ...card, worktree: card.worktree }}
-          running={running}
-          onCancel={() => setDeletingWorktree(false)}
-          onDelete={(remove, force) => {
-            setDeletingWorktree(false)
-            removeWorktreeCard(workspaceId, card, remove, force)
-          }}
-        />
-      )}
+      {
+        // The card's dialogs go to the view's body: inside the card, its stacking context
+        // (`isolation: isolate`) would draw the cards after it over them.
+        createPortal(
+          <>
+            {editingStartup && (
+              <StartupDialog
+                workspaceId={workspaceId}
+                card={card}
+                onClose={() => setEditingStartup(false)}
+              />
+            )}
+            {editingDescription && (
+              <DescriptionDialog
+                workspaceId={workspaceId}
+                card={card}
+                onClose={() => setEditingDescription(false)}
+              />
+            )}
+            {closing && (
+              <CloseCardDialog
+                cardId={card.id}
+                title={card.title}
+                onDone={() => setClosing(false)}
+              />
+            )}
+            {confirm && (
+              <ConfirmDialog
+                title="Delete card"
+                message={confirm}
+                confirmLabel="Delete"
+                onCancel={() => setConfirm(null)}
+                onConfirm={() => {
+                  setConfirm(null)
+                  removeCard(workspaceId, card.id)
+                }}
+              />
+            )}
+            {movingToWorktree && (
+              <MoveToWorktreeDialog
+                workspaceId={workspaceId}
+                card={card}
+                onDone={() => setMovingToWorktree(false)}
+              />
+            )}
+            {removingWorktree && card.worktree && (
+              <RemoveWorktreeDialog
+                workspaceId={workspaceId}
+                card={{ ...card, worktree: card.worktree }}
+                onDone={() => setRemovingWorktree(false)}
+              />
+            )}
+            {merging && card.worktree && (
+              <MergeCardDialog
+                worktree={card.worktree}
+                choice={merging}
+                onMerge={() => merge(merging)}
+                onCancel={() => setMerging(null)}
+              />
+            )}
+            {deletingWorktree && card.worktree && (
+              <DeleteWorktreeCardDialog
+                card={{ ...card, worktree: card.worktree }}
+                running={running}
+                onCancel={() => setDeletingWorktree(false)}
+                onDelete={(remove, force) => {
+                  setDeletingWorktree(false)
+                  removeWorktreeCard(workspaceId, card, remove, force)
+                }}
+              />
+            )}
+          </>,
+          view.document.body
+        )
+      }
     </li>
   )
 }

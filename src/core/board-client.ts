@@ -6,6 +6,7 @@ import { createConnection } from 'node:net'
 import { parseBoardArgs, type BoardCommand } from './board-args'
 import { NOT_IN_A_CARD } from './board-commands'
 import { readClaudeUsage } from './claude-usage'
+import { readDescriptionFile, readProcessStdin } from './description-file'
 import {
   ANSWER_TIMEOUT_MS,
   NO_ANSWER,
@@ -63,12 +64,15 @@ export function sendBoardRequest(
 /**
  * Runs `board <argv>` with `env`'s `BIKUBE_CARD_ID` and `BIKUBE_SOCKET`; resolves with the exit code.
  * `board usage` reads its transcript first (#50 D5): one that can't be read sends nothing.
+ * `board describe` and `board create --description-file` read their file, `readStdin` for `-`,
+ * first (#69 D5, D8): one refused sends nothing.
  */
 export async function runBoard(
   argv: readonly string[],
   env: Record<string, string | undefined>,
   out: BoardOutput,
-  timeoutMs = ANSWER_TIMEOUT_MS
+  timeoutMs = ANSWER_TIMEOUT_MS,
+  readStdin: () => Promise<Uint8Array> = readProcessStdin
 ): Promise<number> {
   const args = parseBoardArgs(argv)
   if (args.kind === 'help') {
@@ -93,6 +97,23 @@ export async function runBoard(
     } catch {
       out.stderr(`board: can't read ${args.path}\n`)
       return 1
+    }
+  } else if (args.kind === 'descriptionFile' || args.kind === 'createWithDescription') {
+    const read = await readDescriptionFile(args.path, readStdin)
+    if (!read.ok) {
+      out.stderr(`${read.error}\n`)
+      return 1
+    }
+    if (args.kind === 'createWithDescription') {
+      // An empty file is no description (#69 D1): the card is created without one.
+      command = read.description ? { ...args.command, description: read.description } : args.command
+    } else {
+      command = {
+        command: 'describe',
+        card: args.card,
+        description: read.description,
+        ...(args.workspace !== undefined && { workspace: args.workspace })
+      }
     }
   } else {
     command = args.command

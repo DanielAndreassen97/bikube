@@ -573,6 +573,21 @@ describe('workspace views and card open times in the saved state', () => {
     expect(parseSavedState(text)).toEqual({ ok: true, value: s.getState() })
   })
 
+  it('saves a recent sort and reads a bad one as manual, loading the rest (#69 D12)', () => {
+    const s = new InMemoryWorkspaceStore({ initialState: fullState() })
+    ok(s.updateWorkspace(s.getState().workspaces[0].id, { sort: 'recent' }))
+    const text = serializeSavedState(s.getState())
+    const [first, second] = JSON.parse(text).state.workspaces
+    expect(first.sort).toBe('recent')
+    expect('sort' in second).toBe(false)
+    expect(parseSavedState(text)).toEqual({ ok: true, value: s.getState() })
+    for (const bad of ['manual', 'oldest', 1, null, {}])
+      expect(parseSavedState(fileWith((f) => (f.workspaces[0].sort = bad)))).toEqual({
+        ok: true,
+        value: fullState()
+      })
+  })
+
   it('rejects a view that is not a string', () => {
     expectRejected(fileWith((s) => (s.workspaces[0].view = 1)))
   })
@@ -631,5 +646,71 @@ describe('temporary shells are never saved (#66 D2, AC4)', () => {
     const file = JSON.stringify({ version: 1, state: s.getState() })
     const parsed = parseSavedState(file)
     expect(parsed.ok && parsed.value.workspaces[0]!.shells).toEqual([named])
+  })
+})
+
+describe('card descriptions in the saved state (#69 D1)', () => {
+  it('writes a description only on a card with one, and reads it back', () => {
+    const s = new InMemoryWorkspaceStore({ initialState: fullState() })
+    const [alpha] = s.getState().workspaces
+    ok(s.setCardDescription(alpha.id, alpha.cards[0].id, '# Goal\nFix the login bug'))
+    const text = serializeSavedState(s.getState())
+    const [first, second] = JSON.parse(text).state.workspaces[0].cards
+    expect(first.description).toBe('# Goal\nFix the login bug')
+    expect('description' in second).toBe(false)
+    expect(parseSavedState(text)).toEqual({ ok: true, value: s.getState() })
+  })
+
+  it('drops a bad description only, keeping the card and the rest of the file', () => {
+    const read = parseSavedState(
+      fileWith((f) => {
+        f.workspaces[0].cards[0].description = 42
+        f.workspaces[0].cards[1].description = 'trailing \n'
+        f.workspaces[0].cards[2].description = 'x'.repeat(100_001)
+        f.workspaces[1].cards[0].description = ''
+      })
+    )
+    expect(read).toEqual({ ok: true, value: fullState() })
+  })
+})
+
+describe('the New mark in the saved state (#69 D11)', () => {
+  it('writes unopened only on a card marked, reads it back, and drops a bad value only', () => {
+    const state = fullState()
+    state.workspaces[0]!.cards[0] = { ...state.workspaces[0]!.cards[0]!, unopened: true }
+    const text = serializeSavedState(state)
+    const [first, second] = JSON.parse(text).state.workspaces[0].cards
+    expect(first.unopened).toBe(true)
+    expect('unopened' in second).toBe(false)
+    expect(parseSavedState(text)).toEqual({ ok: true, value: state })
+    const read = parseSavedState(
+      fileWith((f) => {
+        f.workspaces[0].cards[0].unopened = 'yes'
+        f.workspaces[0].cards[1].unopened = false
+      })
+    )
+    expect(read).toEqual({ ok: true, value: fullState() })
+  })
+})
+
+describe('a pending worktree in the saved state (#69 D10)', () => {
+  it('writes it only on a card that has one, reads it back, and drops a bad value only', () => {
+    const state = fullState()
+    state.workspaces[0]!.cards[0] = {
+      ...state.workspaces[0]!.cards[0]!,
+      pendingWorktree: { branch: 'port-x' }
+    }
+    const text = serializeSavedState(state)
+    const [first, second] = JSON.parse(text).state.workspaces[0].cards
+    expect(first.pendingWorktree).toEqual({ branch: 'port-x' })
+    expect('pendingWorktree' in second).toBe(false)
+    expect(parseSavedState(text)).toEqual({ ok: true, value: state })
+    const read = parseSavedState(
+      fileWith((f) => {
+        f.workspaces[0].cards[0].pendingWorktree = { branch: 'a b' }
+        f.workspaces[0].cards[1].pendingWorktree = 'port-x'
+      })
+    )
+    expect(read).toEqual({ ok: true, value: fullState() })
   })
 })

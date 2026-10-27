@@ -8,7 +8,7 @@ import { NO_ANSWER } from './board-client'
 import { NOT_IN_A_CARD } from './board-commands'
 import {
   MAX_REPLY_OUTPUT_LENGTH,
-  MAX_REQUEST_LINE_BYTES,
+  MAX_REPLY_ERROR_LENGTH,
   type BoardReply,
   type BoardRequest
 } from './board-protocol'
@@ -51,7 +51,7 @@ function asReply(value: unknown): BoardReply | null {
     }
     return null
   }
-  if (ok === false && typeof error === 'string' && error.length <= MAX_REQUEST_LINE_BYTES) {
+  if (ok === false && typeof error === 'string' && error.length <= MAX_REPLY_ERROR_LENGTH) {
     return { ok: false, error }
   }
   return null
@@ -59,17 +59,29 @@ function asReply(value: unknown): BoardReply | null {
 
 /** The command in a request, without its version and calling card. */
 function commandOf(request: BoardRequest): BoardCommand {
+  const where = request.command === 'workspaces' ? {} : workspaceOf(request)
   switch (request.command) {
+    case 'workspaces':
+      return { command: 'workspaces', format: request.format }
     case 'list':
-      return { command: 'list', format: request.format }
+      return { command: 'list', format: request.format, ...where }
     case 'create':
-      return { command: 'create', column: request.column, title: request.title }
+      return {
+        command: 'create',
+        column: request.column,
+        title: request.title,
+        ...where,
+        ...(request.agent !== undefined && { agent: request.agent }),
+        ...(request.description !== undefined && { description: request.description }),
+        ...(request.worktree && { worktree: true as const }),
+        ...(request.branch !== undefined && { branch: request.branch })
+      }
     case 'rename':
-      return { command: 'rename', card: request.card, title: request.title }
+      return { command: 'rename', card: request.card, title: request.title, ...where }
     case 'move':
-      return { command: 'move', card: request.card, column: request.column }
+      return { command: 'move', card: request.card, column: request.column, ...where }
     case 'status':
-      return { command: 'status', card: request.card, text: request.text }
+      return { command: 'status', card: request.card, text: request.text, ...where }
     case 'activity':
       return { command: 'activity', card: request.card, activity: request.activity }
     case 'session':
@@ -78,7 +90,23 @@ function commandOf(request: BoardRequest): BoardCommand {
       return { command: 'setup', card: request.card, result: request.result }
     case 'usage':
       return { command: 'usage', card: request.card, usage: request.usage }
+    case 'description':
+      return { command: 'description', card: request.card, ...where }
+    case 'describe':
+      return {
+        command: 'describe',
+        card: request.card,
+        description: request.description,
+        ...where
+      }
   }
+}
+
+/** The request's `workspace` (#69 D6) as fields to spread: none when it names none. */
+function workspaceOf(request: BoardRequest): { workspace?: string } {
+  return 'workspace' in request && request.workspace !== undefined
+    ? { workspace: request.workspace }
+    : {}
 }
 
 export class BoardRelay<Owner> {

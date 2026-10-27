@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   BOARD_PROTOCOL_VERSION,
   INVALID_REQUEST,
+  MAX_FIELD_BYTES,
   MAX_REQUEST_LINE_BYTES,
   parseReplyLine,
   parseRequestLine,
@@ -176,9 +177,40 @@ describe('serializeRequest / parseRequestLine', () => {
     }
   })
 
-  it('is version 1 with an 8 KB line limit', () => {
+  it('round-trips a description and a describe; a describe needs its text (#69 D5)', () => {
+    const description = { command: 'description', card: '.' } as const
+    expect(parseRequestLine(serializeRequest('c1', description))).toEqual({
+      ok: true,
+      request: { v: 1, cardId: 'c1', ...description }
+    })
+    for (const text of ['# Goal\nFix "it" \\ now 🎉', '']) {
+      const describe = { command: 'describe', card: 'api', description: text } as const
+      expect(parseRequestLine(serializeRequest('c1', describe))).toEqual({
+        ok: true,
+        request: { v: 1, cardId: 'c1', ...describe }
+      })
+    }
+    for (const bad of [
+      { v: 1, cardId: 'c1', command: 'describe', card: '.' },
+      { v: 1, cardId: 'c1', command: 'describe', card: '.', description: 7 },
+      { v: 1, cardId: 'c1', command: 'description', card: '.', description: 'x' }
+    ]) {
+      expect(parseRequestLine(line(bad))).toEqual({ ok: false, error: INVALID_REQUEST })
+    }
+  })
+
+  it('carries a 100,000-character multi-byte description whole (#69 AC14)', () => {
+    const text = '🎉é'.repeat(50_000)
+    const request = serializeRequest('c1', { command: 'describe', card: '.', description: text })
+    expect(parseRequestLine(request)).toEqual({
+      ok: true,
+      request: { v: 1, cardId: 'c1', command: 'describe', card: '.', description: text }
+    })
+  })
+
+  it('is version 1 with a 512 KiB line limit (#69 D5)', () => {
     expect(BOARD_PROTOCOL_VERSION).toBe(1)
-    expect(MAX_REQUEST_LINE_BYTES).toBe(8192)
+    expect(MAX_REQUEST_LINE_BYTES).toBe(512 * 1024)
   })
 
   it('rejects invalid JSON and non-objects', () => {
@@ -215,20 +247,74 @@ describe('serializeRequest / parseRequestLine', () => {
     }
   })
 
-  it('rejects a line over 8 KB, counted in UTF-8 bytes', () => {
-    const fits = { ...status, text: '' }
+  it('rejects a line over 512 KiB, counted in UTF-8 bytes', () => {
+    // Only a description may fill the line (#69 D5); other fields stop at 8 KiB.
+    const describe = { v: 1, cardId: 'c1', command: 'describe', card: '.' }
+    const fits = { ...describe, description: '' }
     const room = MAX_REQUEST_LINE_BYTES - line(fits).length
-    expect(parseRequestLine(line({ ...status, text: 'a'.repeat(room) })).ok).toBe(true)
-    expect(parseRequestLine(line({ ...status, text: 'a'.repeat(room + 1) }))).toEqual({
+    expect(parseRequestLine(line({ ...describe, description: 'a'.repeat(room) })).ok).toBe(true)
+    expect(parseRequestLine(line({ ...describe, description: 'a'.repeat(room + 1) }))).toEqual({
       ok: false,
       error: 'board: request too long'
     })
     // 'é' is two bytes: half as many characters already go over.
-    expect(parseRequestLine(line({ ...status, text: 'é'.repeat(room / 2 + 1) })).ok).toBe(false)
-    expect(parseRequestLine('x'.repeat(9 * 1024))).toEqual({
+    expect(
+      parseRequestLine(line({ ...describe, description: 'é'.repeat(Math.floor(room / 2) + 1) })).ok
+    ).toBe(false)
+    expect(parseRequestLine('x'.repeat(513 * 1024))).toEqual({
       ok: false,
       error: 'board: request too long'
     })
+  })
+
+  it('refuses any field but a description over 8 KiB in UTF-8 bytes, as before #69', () => {
+    const limit = MAX_FIELD_BYTES
+    expect(limit).toBe(8 * 1024)
+    const at = 'a'.repeat(limit)
+    const over = 'a'.repeat(limit + 1)
+    // 'é' is two bytes: half the characters plus one go over.
+    const overWide = 'é'.repeat(limit / 2 + 1)
+    const requests = (value: string): Record<string, unknown>[] => [
+      { v: 1, cardId: 'c1', command: 'rename', card: '.', title: value },
+      { v: 1, cardId: 'c1', command: 'create', column: 'Todo', title: value },
+      { v: 1, cardId: 'c1', command: 'create', column: value, title: 'x' },
+      { v: 1, cardId: 'c1', command: 'create', column: 'Todo', title: 'x', workspace: value },
+      {
+        v: 1,
+        cardId: 'c1',
+        command: 'create',
+        column: 'T',
+        title: 'x',
+        worktree: true,
+        branch: value
+      },
+      { ...move, column: value },
+      { ...move, card: value },
+      { ...move, cardId: value },
+      { ...status, text: value },
+      { v: 1, cardId: 'c1', command: 'describe', card: '.', description: 'd', workspace: value }
+    ]
+    for (const value of requests(at)) expect(parseRequestLine(line(value)).ok).toBe(true)
+    for (const bad of [over, overWide]) {
+      for (const value of requests(bad)) {
+        expect(parseRequestLine(line(value))).toEqual({
+          ok: false,
+          error: 'board: request too long'
+        })
+      }
+    }
+    // A description alone may be longer, in describe and create.
+    const long = 'a'.repeat(100_000)
+    expect(
+      parseRequestLine(
+        line({ v: 1, cardId: 'c1', command: 'describe', card: '.', description: long })
+      ).ok
+    ).toBe(true)
+    expect(
+      parseRequestLine(
+        line({ v: 1, cardId: 'c1', command: 'create', column: 'T', title: 'x', description: long })
+      ).ok
+    ).toBe(true)
   })
 })
 
@@ -255,6 +341,79 @@ describe('serializeReply / parseReplyLine', () => {
       '{"ok":"yes"}'
     ]) {
       expect(parseReplyLine(bad)).toBeNull()
+    }
+  })
+})
+
+describe('requests across workspaces (#69 D6–D8)', () => {
+  it('round-trips workspaces, a workspace on the commands that take it, and create with agent and description', () => {
+    for (const command of [
+      { command: 'workspaces', format: 'json' },
+      { command: 'workspaces', format: 'text' },
+      { command: 'list', format: 'text', workspace: 'Beta' },
+      { command: 'rename', card: 'x', title: 'Y', workspace: 'b' },
+      { command: 'move', card: 'x', column: 'Done', workspace: 'b' },
+      { command: 'status', card: 'x', text: 'q', workspace: 'b' },
+      { command: 'description', card: 'x', workspace: 'b' },
+      { command: 'describe', card: 'x', description: 'd', workspace: 'b' },
+      {
+        command: 'create',
+        column: 'Todo',
+        title: 'Port X',
+        workspace: 'beta',
+        agent: 'pi',
+        description: '# Port\nDo X'
+      }
+    ] as const) {
+      expect(parseRequestLine(serializeRequest('c1', command))).toEqual({
+        ok: true,
+        request: { v: 1, cardId: 'c1', ...command }
+      })
+    }
+  })
+
+  it('rejects a workspace where none is taken, a mistyped one, and an unknown agent', () => {
+    const base = { v: 1, cardId: 'c1' }
+    for (const value of [
+      { ...base, command: 'workspaces', format: 'json', workspace: 'b' },
+      { ...base, command: 'workspaces', format: 'yaml' },
+      { ...base, command: 'workspaces' },
+      { ...base, command: 'activity', card: '.', activity: 'none', workspace: 'b' },
+      { ...base, command: 'session', card: '.', session: 'x', workspace: 'b' },
+      { ...base, command: 'list', format: 'text', workspace: 3 },
+      { ...base, command: 'create', column: 'T', title: 'x', agent: 'vim' },
+      { ...base, command: 'create', column: 'T', title: 'x', agent: 'shell' },
+      { ...base, command: 'create', column: 'T', title: 'x', description: 1 }
+    ]) {
+      expect(parseRequestLine(line(value))).toEqual({ ok: false, error: INVALID_REQUEST })
+    }
+  })
+})
+
+describe('create with a worktree (#69 D10)', () => {
+  it('round-trips worktree alone and with a branch', () => {
+    for (const command of [
+      { command: 'create', column: 'Todo', title: 'Port X', worktree: true },
+      { command: 'create', column: 'Todo', title: 'Port X', worktree: true, branch: 'port-x' }
+    ] as const) {
+      expect(parseRequestLine(serializeRequest('c1', command))).toEqual({
+        ok: true,
+        request: { v: 1, cardId: 'c1', ...command }
+      })
+    }
+  })
+
+  it('rejects a worktree other than true, a branch without it, and either on another command', () => {
+    const base = { v: 1, cardId: 'c1' }
+    for (const value of [
+      { ...base, command: 'create', column: 'T', title: 'x', worktree: 'yes' },
+      { ...base, command: 'create', column: 'T', title: 'x', worktree: false },
+      { ...base, command: 'create', column: 'T', title: 'x', branch: 'b' },
+      { ...base, command: 'create', column: 'T', title: 'x', worktree: true, branch: 3 },
+      { ...base, command: 'rename', card: '.', title: 'x', worktree: true },
+      { ...base, command: 'move', card: '.', column: 'x', branch: 'b' }
+    ]) {
+      expect(parseRequestLine(line(value))).toEqual({ ok: false, error: INVALID_REQUEST })
     }
   })
 })

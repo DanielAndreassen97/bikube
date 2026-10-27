@@ -195,3 +195,157 @@ describe('runBoard', () => {
     expect(await board(['move', '.', 'Done'])).toMatchObject({ code: 1, stderr: `${NO_ANSWER}\n` })
   })
 })
+
+describe('runBoard: description and describe (#69 D5)', () => {
+  /** Runs `board <argv>` in card c1 with `stdin` as its standard input. */
+  async function boardIn(
+    argv: string[],
+    stdin: Uint8Array = new Uint8Array()
+  ): Promise<{ code: number; stdout: string; stderr: string }> {
+    let stdout = ''
+    let stderr = ''
+    const code = await runBoard(
+      argv,
+      { BIKUBE_CARD_ID: 'c1', BIKUBE_SOCKET: socketPath },
+      { stdout: (text) => (stdout += text), stderr: (text) => (stderr += text) },
+      undefined,
+      async () => stdin
+    )
+    return { code, stdout, stderr }
+  }
+  const utf8 = (text: string): Uint8Array => new TextEncoder().encode(text)
+
+  it("prints the card's description (AC4)", async () => {
+    const handler = vi.fn(async () => ({ ok: true, output: 'Hello 69\n' }) as BoardReply)
+    await serve(handler)
+    expect(await boardIn(['description', '.'])).toEqual({
+      code: 0,
+      stdout: 'Hello 69\n',
+      stderr: ''
+    })
+    expect(handler).toHaveBeenCalledWith({ v: 1, cardId: 'c1', command: 'description', card: '.' })
+  })
+
+  it("sends a file's text, and stdin's for -, trimmed (AC4)", async () => {
+    const handler = vi.fn(async () => ({ ok: true }) as BoardReply)
+    await serve(handler)
+    const file = join(dir, 'task.md')
+    await writeFile(file, '# Goal\nFix it\n\n')
+    expect(await boardIn(['describe', 'api', file])).toEqual({ code: 0, stdout: '', stderr: '' })
+    expect(handler).toHaveBeenLastCalledWith({
+      v: 1,
+      cardId: 'c1',
+      command: 'describe',
+      card: 'api',
+      description: '# Goal\nFix it'
+    })
+    expect(await boardIn(['describe', '.', '-'], utf8('New text'))).toEqual({
+      code: 0,
+      stdout: '',
+      stderr: ''
+    })
+    expect(handler).toHaveBeenLastCalledWith({
+      v: 1,
+      cardId: 'c1',
+      command: 'describe',
+      card: '.',
+      description: 'New text'
+    })
+  })
+
+  it('sends an empty file as no description (D5)', async () => {
+    const handler = vi.fn(async () => ({ ok: true }) as BoardReply)
+    await serve(handler)
+    expect(await boardIn(['describe', '.', '-'], utf8(' \n'))).toMatchObject({ code: 0 })
+    expect(handler).toHaveBeenLastCalledWith(expect.objectContaining({ description: '' }))
+  })
+
+  it('refuses a file over 100,000 characters, unreadable or not UTF-8, sending nothing (AC4)', async () => {
+    const handler = vi.fn(async () => ({ ok: true }) as BoardReply)
+    await serve(handler)
+    const long = join(dir, 'long.md')
+    await writeFile(long, 'a'.repeat(100_001))
+    expect(await boardIn(['describe', '.', long])).toEqual({
+      code: 1,
+      stdout: '',
+      stderr: 'board: Description is longer than 100,000 characters\n'
+    })
+    expect(await boardIn(['describe', '.', join(dir, 'nope.md')])).toEqual({
+      code: 1,
+      stdout: '',
+      stderr: `board: can't read ${join(dir, 'nope.md')}\n`
+    })
+    expect(await boardIn(['describe', '.', '-'], new Uint8Array([0x61, 0xff, 0xfe]))).toEqual({
+      code: 1,
+      stdout: '',
+      stderr: 'board: stdin is not UTF-8 text\n'
+    })
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it("reads create's --description-file, - for stdin, and sends it with the card (#69 D8, AC6)", async () => {
+    const handler = vi.fn(async () => ({ ok: true, output: 'c-new Beta\n' }) as BoardReply)
+    await serve(handler)
+    const argv = ['create', '--workspace', 'beta', '--description-file', '-', 'Todo', 'Port X']
+    expect(await boardIn(argv, utf8('# Port\nDo X'))).toEqual({
+      code: 0,
+      stdout: 'c-new Beta\n',
+      stderr: ''
+    })
+    expect(handler).toHaveBeenLastCalledWith({
+      v: 1,
+      cardId: 'c1',
+      command: 'create',
+      column: 'Todo',
+      title: 'Port X',
+      workspace: 'beta',
+      description: '# Port\nDo X'
+    })
+    const long = join(dir, 'long.md')
+    await writeFile(long, 'a'.repeat(100_001))
+    handler.mockClear()
+    expect(await boardIn(['create', '--description-file', long, 'Todo', 'x'])).toEqual({
+      code: 1,
+      stdout: '',
+      stderr: 'board: Description is longer than 100,000 characters\n'
+    })
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('sends a create with an empty description file as one without (#69 D1)', async () => {
+    const handler = vi.fn(async () => ({ ok: true }) as BoardReply)
+    await serve(handler)
+    await boardIn(['create', '--description-file', '-', 'Todo', 'x'], utf8('  \n'))
+    expect(handler).toHaveBeenLastCalledWith({
+      v: 1,
+      cardId: 'c1',
+      command: 'create',
+      column: 'Todo',
+      title: 'x'
+    })
+  })
+
+  it('sends a describe with its --workspace (#69 D6)', async () => {
+    const handler = vi.fn(async () => ({ ok: true }) as BoardReply)
+    await serve(handler)
+    await boardIn(['describe', '--workspace', 'b', 'x', '-'], utf8('t'))
+    expect(handler).toHaveBeenLastCalledWith({
+      v: 1,
+      cardId: 'c1',
+      command: 'describe',
+      card: 'x',
+      description: 't',
+      workspace: 'b'
+    })
+  })
+
+  it('sends a 100,000-character multi-byte description whole (AC14)', async () => {
+    const handler = vi.fn(async () => ({ ok: true }) as BoardReply)
+    await serve(handler)
+    const text = '🎉é'.repeat(50_000)
+    const file = join(dir, 'big.md')
+    await writeFile(file, text)
+    expect(await boardIn(['describe', '.', file])).toEqual({ code: 0, stdout: '', stderr: '' })
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ description: text }))
+  })
+})

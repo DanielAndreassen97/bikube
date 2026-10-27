@@ -1501,6 +1501,20 @@ describe('workspace views and card open times', () => {
     expect(s.updateWorkspace(w.id, { view: 'list' as never })).toMatchObject({ ok: false })
   })
 
+  it('sorts a workspace recently opened first, or back to manual with no sort key (#69 D12)', () => {
+    const s = make()
+    const w = create(s, 'alpha')
+    card(s, w, 'api', 1)
+    const before = s.getState().workspaces[0].cards
+    expect('sort' in w).toBe(false)
+    expect(ok(s.updateWorkspace(w.id, { sort: 'recent' })).sort).toBe('recent')
+    // Other patches keep it.
+    expect(ok(s.updateWorkspace(w.id, { name: 'beta' })).sort).toBe('recent')
+    expect('sort' in ok(s.updateWorkspace(w.id, { sort: 'manual' }))).toBe(false)
+    expect(s.getState().workspaces[0].cards).toBe(before)
+    expect(s.updateWorkspace(w.id, { sort: 'oldest' as never })).toMatchObject({ ok: false })
+  })
+
   it("stamps a new card's creation with the store's clock, and none without one", () => {
     const plain = make()
     expect('createdAt' in card(plain, create(plain, 'x'), 'api')).toBe(false)
@@ -1520,6 +1534,21 @@ describe('workspace views and card open times', () => {
     ok(s.markCardOpened(w.id, api.id, 5))
     expect(s.getState()).toBe(state)
     expect(s.markCardOpened(w.id, 'nope', 5)).toMatchObject({ ok: false, error: { field: 'card' } })
+  })
+
+  it('creates a card marked unopened when asked, and its first open clears the mark (#69 D11)', () => {
+    const s = make()
+    const w = create(s, 'alpha')
+    const created = ok(
+      s.createCard(w.id, w.columns[0].id, 'Port X', undefined, undefined, undefined, {
+        unopened: true
+      })
+    )
+    expect(created.unopened).toBe(true)
+    expect('unopened' in card(s, w, 'plain')).toBe(false)
+    const opened = ok(s.markCardOpened(w.id, created.id, 7))
+    expect(opened.lastOpenedAt).toBe(7)
+    expect('unopened' in opened).toBe(false)
   })
 
   it("keeps a card's last status and usage, '' and no tokens forgetting them, the same saving nothing", () => {
@@ -1550,5 +1579,110 @@ describe('workspace views and card open times', () => {
       ok: false,
       error: { field: 'card' }
     })
+  })
+})
+
+describe('card descriptions (#69 D1)', () => {
+  it('creates a card with a trimmed description, none when empty, and refuses one over the cap', () => {
+    const s = make()
+    const w = create(s, 'alpha')
+    const column = w.columns[0].id
+    const fix = ok(s.createCard(w.id, column, 'Fix', undefined, undefined, '# Goal\nFix it \n'))
+    expect(fix.description).toBe('# Goal\nFix it')
+    expect(
+      'description' in ok(s.createCard(w.id, column, 'Plain', undefined, undefined, ' \n'))
+    ).toBe(false)
+    const state = s.getState()
+    expect(s.createCard(w.id, column, 'Big', undefined, undefined, 'x'.repeat(100_001))).toEqual({
+      ok: false,
+      error: { field: 'description', message: 'Description is longer than 100,000 characters' }
+    })
+    expect(s.getState()).toBe(state)
+  })
+
+  it('sets, replaces and removes a description, changing nothing else, the same saving nothing', () => {
+    const s = make()
+    const w = create(s, 'alpha')
+    const api = card(s, w, 'api')
+    expect(ok(s.setCardDescription(w.id, api.id, 'Step one\nStep two\n'))).toEqual({
+      ...api,
+      description: 'Step one\nStep two'
+    })
+    const state = s.getState()
+    ok(s.setCardDescription(w.id, api.id, 'Step one\nStep two'))
+    expect(s.getState()).toBe(state)
+    expect(s.setCardDescription(w.id, api.id, 'x'.repeat(100_001))).toMatchObject({
+      ok: false,
+      error: { field: 'description' }
+    })
+    expect(s.getState()).toBe(state)
+    expect(ok(s.setCardDescription(w.id, api.id, ''))).toEqual(api)
+    expect(s.setCardDescription(w.id, 'nope', 'x')).toMatchObject({
+      ok: false,
+      error: { field: 'card' }
+    })
+  })
+})
+
+describe('pending worktree (#69 D10)', () => {
+  const worktree = {
+    directory: '/data/worktrees/repo-abc123/port-x',
+    worktree: { path: '/data/worktrees/repo-abc123/port-x', branch: 'port-x', repo: '/tmp/repo' }
+  }
+  const pending = { pendingWorktree: { branch: 'port-x' } }
+
+  it('creates a local card in the workspace folder with its pending worktree, none without one', () => {
+    const s = make()
+    const w = ok(s.createWorkspace({ name: 'a', directory: '/tmp/repo', worktreeSetup: 'npm ci' }))
+    const c = ok(
+      s.createCard(w.id, w.columns[0].id, 'Port X', undefined, undefined, undefined, pending)
+    )
+    expect(c.pendingWorktree).toEqual({ branch: 'port-x' })
+    expect(c.directory).toBe('/tmp/repo')
+    expect(c).not.toHaveProperty('worktree')
+    expect(c).not.toHaveProperty('setup')
+    expect(ok(s.createCard(w.id, w.columns[0].id, 'plain'))).not.toHaveProperty('pendingWorktree')
+  })
+
+  it('refuses one for an SSH workspace or with a bad branch, creating nothing', () => {
+    const s = make()
+    const w = ok(s.createWorkspace({ name: 'a', directory: '/tmp/repo' }))
+    const r = ok(s.createWorkspace({ name: 'r', directory: '~/a', host: 'devbox' }))
+    const before = s.getState()
+    const opts = (branch: string): { pendingWorktree: { branch: string } } => ({
+      pendingWorktree: { branch }
+    })
+    expect(
+      s.createCard(r.id, r.columns[0].id, 'x', undefined, undefined, undefined, pending)
+    ).toMatchObject({ ok: false, error: { field: 'card' } })
+    expect(
+      s.createCard(w.id, w.columns[0].id, 'x', undefined, undefined, undefined, opts('a b'))
+    ).toMatchObject({ ok: false, error: { message: 'Not a valid branch name' } })
+    expect(s.getState()).toBe(before)
+  })
+
+  it('is made by moving the card to its worktree, which clears it in the same change', () => {
+    const s = make()
+    const w = ok(s.createWorkspace({ name: 'a', directory: '/tmp/repo' }))
+    const c = ok(
+      s.createCard(w.id, w.columns[0].id, 'Port X', undefined, undefined, undefined, pending)
+    )
+    const moved = ok(s.moveCardToWorktree(w.id, c.id, worktree))
+    expect(moved.worktree).toEqual(worktree.worktree)
+    expect(moved).not.toHaveProperty('pendingWorktree')
+  })
+
+  it('is dropped by clearPendingWorktree, the card staying in the workspace folder', () => {
+    const s = make()
+    const w = ok(s.createWorkspace({ name: 'a', directory: '/tmp/repo' }))
+    const c = ok(
+      s.createCard(w.id, w.columns[0].id, 'Port X', undefined, undefined, undefined, pending)
+    )
+    const cleared = ok(s.clearPendingWorktree(w.id, c.id))
+    expect(cleared).not.toHaveProperty('pendingWorktree')
+    expect(cleared.directory).toBe('/tmp/repo')
+    const state = s.getState()
+    ok(s.clearPendingWorktree(w.id, c.id))
+    expect(s.getState()).toBe(state)
   })
 })

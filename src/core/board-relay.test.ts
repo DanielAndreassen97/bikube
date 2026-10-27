@@ -165,3 +165,38 @@ describe('BoardRelay', () => {
     await expect(relay.handle(request)).resolves.toEqual({ ok: false, error: NO_WINDOW })
   })
 })
+
+describe('BoardRelay across workspaces (#69 D6–D8)', () => {
+  it('forwards workspaces, a workspace, and create with its agent and description', () => {
+    const commands: BoardCommand[] = [
+      { command: 'workspaces', format: 'json' },
+      { command: 'list', format: 'text', workspace: 'b' },
+      {
+        command: 'create',
+        column: 'T',
+        title: 'x',
+        workspace: 'b',
+        agent: 'codex',
+        description: 'd'
+      },
+      { command: 'rename', card: 'x', title: 'y', workspace: 'b' },
+      { command: 'move', card: 'x', column: 'Done', workspace: 'b' },
+      { command: 'status', card: 'x', text: 'q', workspace: 'b' },
+      { command: 'description', card: 'x', workspace: 'b' },
+      { command: 'describe', card: 'x', description: 'd', workspace: 'b' }
+    ]
+    for (const command of commands) void relay.handle({ v: 1, cardId: 'c1', ...command })
+    expect(sent.map((s) => s.command)).toEqual(commands)
+  })
+})
+
+describe('BoardRelay: create with a worktree (#69 D10)', () => {
+  it('forwards worktree and branch', () => {
+    const commands: BoardCommand[] = [
+      { command: 'create', column: 'T', title: 'x', worktree: true },
+      { command: 'create', column: 'T', title: 'x', worktree: true, branch: 'port-x' }
+    ]
+    for (const command of commands) void relay.handle({ v: 1, cardId: 'c1', ...command })
+    expect(sent.map((s) => s.command)).toEqual(commands)
+  })
+})

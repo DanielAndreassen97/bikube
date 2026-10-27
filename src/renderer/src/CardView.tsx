@@ -5,13 +5,16 @@ import { SPAWN_REFUSAL } from '../../core/spawn-refusals'
 import { keymapAction } from '../../core/keymap'
 import { canSplit, MAIN_PANE, paneIds, type SplitTree } from '../../core/split-tree'
 import type { Card } from '../../core/workspace-store'
-import { requestCloseCard } from './card-actions'
+import { requestCloseCard, runPendingInWorkspaceFolder, startCard } from './card-actions'
+import { usePendingWorktree, type PendingWorktreeRun } from './pending-worktrees'
 import CloseCardDialog from './CloseCardDialog'
+import DescriptionDialog from './DescriptionDialog'
 import RemoveWorktreeDialog from './RemoveWorktreeDialog'
 import FindBar from './FindBar'
 import { SMALL_ICON } from './icons'
 import { isCardViewAction, registerCardViewActions, type CardViewAction } from './card-view-actions'
 import { currentKeymap, settingsStore, useSettings } from './settings'
+import { workspaceStore } from './store'
 import SidePanel from './SidePanel'
 import {
   cardPanes,
@@ -53,6 +56,60 @@ interface FindProps {
  */
 interface ZoomProps {
   zoomedPanes?: number
+}
+
+/**
+ * A card's pending worktree at its first open (#69 D10), in place of its panes: being made, or
+ * git's reason it failed with Retry and Run in workspace folder (which drops it).
+ */
+function PendingWorktreeView({
+  run,
+  branch,
+  onRetry,
+  onRunInFolder
+}: {
+  run: PendingWorktreeRun
+  branch: string | undefined
+  onRetry: () => void
+  onRunInFolder: () => void
+}): React.JSX.Element {
+  if (run.kind === 'making') {
+    return (
+      <div className="empty-state" data-testid="pending-worktree" role="status">
+        <h1>Making its worktree…</h1>
+        <p>
+          A new branch{branch ? ` ${branch}` : ''} from the workspace folder, with ignored files
+          copied. The card starts there once it is ready.
+        </p>
+      </div>
+    )
+  }
+  return (
+    <div className="empty-state" data-testid="pending-worktree">
+      <h1>Couldn’t make its worktree</h1>
+      <p role="alert" data-testid="pending-worktree-error">
+        {run.reason}
+      </p>
+      <div className="modal-actions">
+        <button
+          type="button"
+          className="btn"
+          data-testid="pending-worktree-folder"
+          onClick={onRunInFolder}
+        >
+          Run in workspace folder
+        </button>
+        <button
+          type="button"
+          className="btn btn-primary"
+          data-testid="pending-worktree-retry"
+          onClick={onRetry}
+        >
+          Retry
+        </button>
+      </div>
+    </div>
+  )
 }
 
 /**
@@ -201,6 +258,7 @@ function CardView({
   // Shown here, a trigger is listed in the sidebar from now on.
   useEffect(() => markOpened(card.id), [card.id])
   const [closing, setClosing] = useState(false)
+  const [editingDescription, setEditingDescription] = useState(false)
   // A card that stops or fails while its Close dialog is open has nothing left to close.
   if (closing && runState.kind !== 'running') setClosing(false)
   const layout = usePaneLayout(card.id)
@@ -213,8 +271,12 @@ function CardView({
   const [goneDismissed, setGoneDismissed] = useState(false)
   if (goneDismissed && !worktreeGone) setGoneDismissed(false)
 
+  // Its pending worktree being made or failed (#69 D10): the card isn't started yet.
+  const pendingRun = usePendingWorktree(card.id)
+  const awaitingWorktree = pendingRun !== undefined && runState.kind !== 'running'
+
   // When the shell exits the card is Stopped and the view goes back to the board (#5 D6).
-  const stopped = runState.kind === 'stopped'
+  const stopped = runState.kind === 'stopped' && pendingRun === undefined
   useEffect(() => {
     if (stopped) onBack()
   }, [stopped, onBack])
@@ -265,6 +327,12 @@ function CardView({
       // Zooms the focused pane or ends the zoom (#48 D3); the terminal keeps the keyboard.
       else if (action === 'zoomPane') cardPanes().toggleZoom(card.id)
       else if (action === 'openInWindow') onOpenInWindow?.()
+      // The open card has no menu (#31 D1): the palette edits its description (#69 D4); a
+      // shell has none.
+      else if (action === 'editDescription') {
+        const ws = workspaceStore.getState().workspaces.find((w) => w.id === workspaceId)
+        if (ws?.cards.some((c) => c.id === card.id)) setEditingDescription(true)
+      }
       // Splitting acts only while the card runs and has fewer than 4 panes (#11 D4); it ends a
       // zoom (#48 D4).
       else if (action === 'splitRight' || action === 'splitDown') {
@@ -279,7 +347,7 @@ function CardView({
         requestCloseCard(card.id, () => setClosing(true))
       }
     }
-  }, [onBack, onOpenInWindow, card, splittable, running, focusedPane, view])
+  }, [onBack, onOpenInWindow, card, splittable, running, focusedPane, view, workspaceId])
   useEffect(() => {
     const run = (action: CardViewAction): void => runAction.current(action)
     // Capture phase: works wherever focus is, including the terminal, which swallows the key.
@@ -313,15 +381,31 @@ function CardView({
           data-testid="card-terminal"
           data-zoomed={layout.zoomed === true}
         >
-          <PaneTree
-            cardId={card.id}
-            tree={layout.tree}
-            focused={layout.focused}
-            find={find}
-            onCloseFind={closeFind}
-            zoomedPanes={layout.zoomed ? paneIds(layout.tree).length : undefined}
-          />
+          {awaitingWorktree ? (
+            <PendingWorktreeView
+              run={pendingRun}
+              branch={card.pendingWorktree?.branch}
+              onRetry={() => startCard(workspaceId, card.id)}
+              onRunInFolder={() => runPendingInWorkspaceFolder(workspaceId, card.id)}
+            />
+          ) : (
+            <PaneTree
+              cardId={card.id}
+              tree={layout.tree}
+              focused={layout.focused}
+              find={find}
+              onCloseFind={closeFind}
+              zoomedPanes={layout.zoomed ? paneIds(layout.tree).length : undefined}
+            />
+          )}
         </div>
+        {editingDescription && (
+          <DescriptionDialog
+            workspaceId={workspaceId}
+            card={card}
+            onClose={() => setEditingDescription(false)}
+          />
+        )}
         {closing && (
           <CloseCardDialog cardId={card.id} title={card.title} onDone={() => setClosing(false)} />
         )}

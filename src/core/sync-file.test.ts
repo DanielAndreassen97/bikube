@@ -434,6 +434,21 @@ describe('workspace views and card times in the sync file', () => {
     expect(read.ok && read.workspaces[0]!.cards[0]!).not.toHaveProperty('lastOpenedAt')
   })
 
+  it('writes and reads a recent sort like the view (#69 D12)', () => {
+    const state: WorkspaceState = {
+      activeId: 'w',
+      workspaces: [workspace('w', 'alpha', { sort: 'recent' }), workspace('v', 'beta')]
+    }
+    const board = toSyncBoard(state, HOME)
+    expect(board.workspaces[0]!.sort).toBe('recent')
+    expect(board.workspaces[1]!).not.toHaveProperty('sort')
+    const file = JSON.parse(serializeSyncFile(board, new Date(0)))
+    file.board.workspaces[1].sort = 'sideways'
+    const read = parseSyncFile(JSON.stringify(file), '/tmp/hb')
+    expect(read.ok && read.workspaces[0]!.sort).toBe('recent')
+    expect(read.ok && read.workspaces[1]!).not.toHaveProperty('sort')
+  })
+
   it("never writes or reads a card's last status and usage", () => {
     const usage = {
       input: 1,
@@ -507,5 +522,80 @@ describe('temporary shells never reach the sync file (#66 D2, AC4)', () => {
       HOME
     )
     expect(board.workspaces[0]!.shells).toEqual([named])
+  })
+})
+
+describe('card descriptions in the sync file (#69 D1)', () => {
+  it('writes a description only on a card with one, reads it back, and drops a bad one', () => {
+    const state: WorkspaceState = {
+      activeId: 'w',
+      workspaces: [
+        workspace('w', 'alpha', {
+          cards: [card('a', 'w-backlog', { description: '# Port\nDo X' }), card('b', 'w-backlog')]
+        })
+      ]
+    }
+    const board = toSyncBoard(state, HOME)
+    expect(board.workspaces[0]!.cards[0]!.description).toBe('# Port\nDo X')
+    expect(board.workspaces[0]!.cards[1]!).not.toHaveProperty('description')
+    const file = JSON.parse(serializeSyncFile(board, new Date(0)))
+    const read = parseSyncFile(JSON.stringify(file), '/tmp/hb')
+    expect(read.ok && read.workspaces[0]!.cards[0]!.description).toBe('# Port\nDo X')
+    expect(read.ok && read.workspaces[0]!.cards[1]!).not.toHaveProperty('description')
+    file.board.workspaces[0].cards[0].description = ['not', 'text']
+    const bad = parseSyncFile(JSON.stringify(file), '/tmp/hb')
+    expect(bad.ok && bad.workspaces[0]!.cards.map((c) => c.id)).toEqual(['a', 'b'])
+    expect(bad.ok && bad.workspaces[0]!.cards[0]!).not.toHaveProperty('description')
+  })
+})
+
+describe('the New mark in the sync file (#69 D11)', () => {
+  it('writes unopened only on a card marked, reads it back, and drops a bad value', () => {
+    const state: WorkspaceState = {
+      activeId: 'w',
+      workspaces: [
+        workspace('w', 'alpha', {
+          cards: [card('a', 'w-backlog', { unopened: true }), card('b', 'w-backlog')]
+        })
+      ]
+    }
+    const board = toSyncBoard(state, HOME)
+    expect(board.workspaces[0]!.cards[0]!.unopened).toBe(true)
+    expect(board.workspaces[0]!.cards[1]!).not.toHaveProperty('unopened')
+    const file = JSON.parse(serializeSyncFile(board, new Date(0)))
+    const read = parseSyncFile(JSON.stringify(file), '/tmp/hb')
+    expect(read.ok && read.workspaces[0]!.cards[0]!.unopened).toBe(true)
+    expect(read.ok && read.workspaces[0]!.cards[1]!).not.toHaveProperty('unopened')
+    file.board.workspaces[0].cards[0].unopened = 1
+    const bad = parseSyncFile(JSON.stringify(file), '/tmp/hb')
+    expect(bad.ok && bad.workspaces[0]!.cards.map((c) => c.id)).toEqual(['a', 'b'])
+    expect(bad.ok && bad.workspaces[0]!.cards[0]!).not.toHaveProperty('unopened')
+  })
+})
+
+describe('a pending worktree in the sync file (#69 D10)', () => {
+  it('writes it only on a card that has one, reads it back, and drops a bad value', () => {
+    const state: WorkspaceState = {
+      activeId: 'w',
+      workspaces: [
+        workspace('w', 'alpha', {
+          cards: [
+            card('a', 'w-backlog', { pendingWorktree: { branch: 'port-x' } }),
+            card('b', 'w-backlog')
+          ]
+        })
+      ]
+    }
+    const board = toSyncBoard(state, HOME)
+    expect(board.workspaces[0]!.cards[0]!.pendingWorktree).toEqual({ branch: 'port-x' })
+    expect(board.workspaces[0]!.cards[1]!).not.toHaveProperty('pendingWorktree')
+    const file = JSON.parse(serializeSyncFile(board, new Date(0)))
+    const read = parseSyncFile(JSON.stringify(file), '/tmp/hb')
+    expect(read.ok && read.workspaces[0]!.cards[0]!.pendingWorktree).toEqual({ branch: 'port-x' })
+    expect(read.ok && read.workspaces[0]!.cards[1]!).not.toHaveProperty('pendingWorktree')
+    file.board.workspaces[0].cards[0].pendingWorktree = { branch: 7 }
+    const bad = parseSyncFile(JSON.stringify(file), '/tmp/hb')
+    expect(bad.ok && bad.workspaces[0]!.cards.map((c) => c.id)).toEqual(['a', 'b'])
+    expect(bad.ok && bad.workspaces[0]!.cards[0]!).not.toHaveProperty('pendingWorktree')
   })
 })

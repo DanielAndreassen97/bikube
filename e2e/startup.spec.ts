@@ -27,6 +27,7 @@ import {
   LOCAL_CLAUDE_SETTINGS
 } from './fake-claude'
 import { LOCAL_CLAUDE_INSTRUCTION } from '../src/core/claude-hooks'
+import { FIRST_PROMPT } from '../src/core/startup-command'
 
 // Startup commands (#5): choosing one at creation, the workspace default, changing a card's,
 // and the Claude Code resume. Electron runs with SHELL=/bin/bash and HOME set to a temp
@@ -93,10 +94,14 @@ function selected(select: Locator): Locator {
 async function newCard(
   title: string,
   startup?: 'Shell' | 'Claude Code' | 'Custom…',
-  command?: string
+  command?: string,
+  description?: string
 ): Promise<void> {
   await column('Backlog').getByTestId('new-card').click()
   await page.getByTestId('new-card-input').fill(title)
+  if (description !== undefined) {
+    await page.getByTestId('new-card-description').fill(description)
+  }
   if (startup) await page.getByTestId('new-card-startup').selectOption({ label: startup })
   if (command !== undefined) {
     await page.getByTestId('new-card-command').fill(command)
@@ -227,6 +232,38 @@ test('AC2: a Claude Code card runs claude with a new session id and shows the Cl
   await back()
   await expect(card('agent').getByTestId('card-status-label')).toHaveText('Running')
   await expect(card('agent').getByTestId('card-tag')).toHaveText('Claude')
+})
+
+test('#69 AC2: a Claude Code card with a description passes the first prompt on its fresh start only', async () => {
+  const dir = makeDir('alpha')
+  await createWorkspace(dir, 'alpha')
+  await newCard('agent', 'Claude Code', undefined, '# Goal\nFix the login bug')
+  await expect.poll(logLines).toHaveLength(1)
+  const fresh = new RegExp(`^${SETTINGS_ARGS} --session-id (\\S+) (.*)$`).exec(logLines()[0])
+  expect(fresh?.[2]).toBe(FIRST_PROMPT)
+  const u = fresh![1]
+  expect(u).toMatch(UUID_V4)
+  // The typed line: the prompt single-quoted on the --session-id branch only. Whitespace is
+  // collapsed, since the line wraps and the shell may redraw it.
+  const flat = (text: string): string => text.replace(/\s+/g, ' ')
+  const firstLine =
+    `claude --settings "$BIKUBE_CLAUDE_SETTINGS" --session-id ${u} '${FIRST_PROMPT}' || ` +
+    `claude --settings "$BIKUBE_CLAUDE_SETTINGS" --resume ${u}`
+  await expect
+    .poll(async () => flat((await bufferLines()).join(' ')).includes(flat(firstLine)))
+    .toBe(true)
+  await stopAgent(dir)
+
+  // A resume holds no prompt.
+  await openCard('agent')
+  await expect.poll(() => logLines().at(-1)).toBe(`${SETTINGS_ARGS} --resume ${u}`)
+  await expect
+    .poll(async () =>
+      belowSeparator(await bufferLines()).some((l) => l.endsWith(claudeResumeLine(u)))
+    )
+    .toBe(true)
+  expect(flat(belowSeparator(await bufferLines()).join(' '))).not.toContain(flat(FIRST_PROMPT))
+  expect(logLines()).toHaveLength(2)
 })
 
 test('AC3/AC4: claude quits to a shell; exit stops the card; opening it resumes', async () => {
@@ -642,19 +679,23 @@ test('AC9/D2: a Custom command set from the menu is required and shown in the ta
   await expect(dialog).toHaveCount(0)
 })
 
-test('D9: moving between the new-card fields keeps the form; leaving it unchanged cancels', async () => {
+test('D9: moving between the New card fields keeps the dialog; a click outside keeps it', async () => {
   await createWorkspace(makeDir('alpha'), 'alpha')
   const form = page.getByTestId('new-card-form')
 
-  // Leaving with an empty title and the default command cancels (as #4 D4).
+  // A click outside the New card dialog (#69 D3) keeps it, even unchanged; Esc cancels.
   await column('Backlog').getByTestId('new-card').click()
   await clickBoardBackground()
+  await expect(form).toHaveCount(1)
+  await page.keyboard.press('Escape')
   await expect(form).toHaveCount(0)
 
-  // Tabbing between the title, select and command keeps the form open.
+  // Tabbing between the title, description, select and command keeps the dialog open.
   await column('Backlog').getByTestId('new-card').click()
   await page.getByTestId('new-card-startup').selectOption({ label: 'Custom…' })
   await page.getByTestId('new-card-input').focus()
+  await page.keyboard.press('Tab')
+  await expect(page.getByTestId('new-card-description')).toBeFocused()
   await page.keyboard.press('Tab')
   await expect(page.getByTestId('new-card-startup')).toBeFocused()
   await page.keyboard.press('Tab')

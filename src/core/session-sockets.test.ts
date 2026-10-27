@@ -38,6 +38,43 @@ describe('SessionSockets (#25 D2, D3)', () => {
     expect(handler).not.toHaveBeenCalled()
   })
 
+  it("relays only its own card's description, and no describe (#69 D9)", async () => {
+    const handler = vi.fn(async (): Promise<BoardReply> => ({ ok: true }))
+    sockets = new SessionSockets(boardDir, handler)
+    const local = (await sockets.open('card-1')).forward.localSocket!
+    for (const card of ['.', 'card-1']) {
+      const line = serializeRequest('card-1', { command: 'description', card })
+      expect(await sendBoardRequest(local, line)).toEqual({ ok: true })
+    }
+    expect(handler).toHaveBeenCalledTimes(2)
+    for (const line of [
+      serializeRequest('card-1', { command: 'description', card: 'web' }),
+      serializeRequest('card-1', { command: 'describe', card: '.', description: 'x' })
+    ]) {
+      expect(await sendBoardRequest(local, line)).toEqual({ ok: false, error: INVALID_REQUEST })
+    }
+    expect(handler).toHaveBeenCalledTimes(2)
+  })
+
+  it('relays no workspaces, create, rename or --workspace (#69 D9)', async () => {
+    const handler = vi.fn(async (): Promise<BoardReply> => ({ ok: true }))
+    sockets = new SessionSockets(boardDir, handler)
+    const local = (await sockets.open('card-1')).forward.localSocket!
+    for (const line of [
+      serializeRequest('card-1', { command: 'workspaces', format: 'text' }),
+      serializeRequest('card-1', { command: 'create', column: 'Todo', title: 'x' }),
+      serializeRequest('card-1', { command: 'rename', card: '.', title: 'x' }),
+      serializeRequest('card-1', { command: 'list', format: 'text', workspace: 'Beta' }),
+      serializeRequest('card-1', { command: 'move', card: 'x', column: 'Done', workspace: 'b' }),
+      serializeRequest('card-1', { command: 'description', card: '.', workspace: 'b' })
+    ]) {
+      expect(await sendBoardRequest(local, line)).toEqual({ ok: false, error: INVALID_REQUEST })
+    }
+    expect(handler).not.toHaveBeenCalled()
+    const move = serializeRequest('card-1', { command: 'move', card: 'web', column: 'Done' })
+    expect(await sendBoardRequest(local, move)).toEqual({ ok: true })
+  })
+
   it("relays its own card's requests, on random paths in the board directory and /tmp", async () => {
     const handler = vi.fn(async (): Promise<BoardReply> => ({ ok: false, error: 'board: nope' }))
     sockets = new SessionSockets(boardDir, handler)

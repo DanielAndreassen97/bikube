@@ -8,7 +8,9 @@
 import type { AgentKind } from './agent-presets'
 import { keepKnownRules, rulesNameKnownColumns, type AutoMove } from './auto-move'
 import type { ClaudeUsage } from './claude-usage-types'
+import { checkDescription } from './card-description'
 import { checkHost, checkRemoteDirectory } from './ssh-location'
+import { branchProblem } from './worktree-names'
 import { isWorkspaceLogo, type WorkspaceLogoId } from './workspace-logos'
 import {
   CLAUDE_STARTUP,
@@ -28,6 +30,20 @@ export type WorkspaceView = (typeof WORKSPACE_VIEWS)[number]
 
 export const isWorkspaceView = (value: unknown): value is WorkspaceView =>
   (WORKSPACE_VIEWS as readonly unknown[]).includes(value)
+
+/**
+ * How a Kanban board orders each column's cards (#69 D12): `manual`, the stored board order, or
+ * `recent`, recently created or opened first. Saved as the workspace's `sort` only when `recent`.
+ */
+export const WORKSPACE_SORTS = ['manual', 'recent'] as const
+export type WorkspaceSort = (typeof WORKSPACE_SORTS)[number]
+
+export const isWorkspaceSort = (value: unknown): value is WorkspaceSort =>
+  (WORKSPACE_SORTS as readonly unknown[]).includes(value)
+
+/** The workspace's Kanban sort: its own, or manual without a `sort` key. */
+export const workspaceSort = (workspace: Pick<Workspace, 'sort'>): WorkspaceSort =>
+  workspace.sort ?? 'manual'
 
 /** A workspace's View setting: `default` follows Settings' Default view, else its own. */
 export type WorkspaceViewChoice = 'default' | WorkspaceView
@@ -60,12 +76,23 @@ export interface Card {
   /** Trimmed, never empty (#4 D5). */
   title: string
   /**
+   * Plain markdown text (#69 D1), at most `MAX_DESCRIPTION_LENGTH` characters, trailing
+   * whitespace trimmed; absent when empty. Saved and synced like the title.
+   */
+  description?: string
+  /**
    * Copied from the workspace at creation and never changed (#4 D2): an absolute local path, or
    * for an SSH card a path on its host (#12 D3). A worktree card's is in its worktree.
    */
   directory: string
   /** The card's own git worktree, when it was created with one; absent otherwise. */
   worktree?: CardWorktree
+  /**
+   * The worktree `board create --worktree` asked for (#69 D10), made on the new `branch` at the
+   * card's first open on any machine, which clears it. Local cards only; saved and synced;
+   * absent when none.
+   */
+  pendingWorktree?: PendingWorktree
   /** The SSH host, copied from the workspace at creation and never changed; absent when local (#12 D1). */
   host?: string
   /** What is typed into the shell on every start (#5 D2); changed only per card (#5 D11). */
@@ -96,6 +123,12 @@ export interface Card {
    */
   lastOpenedAt?: number
   /**
+   * Created by `board create` from a card in another workspace and never opened since (#69 D11):
+   * shown as a `New` pill until its first open on any machine clears it. Saved and synced; absent
+   * when false.
+   */
+  unopened?: true
+  /**
    * Its last `board status` text (cleaned), shown on it once Stopped, also after a restart: saved,
    * never synced, since every status would write the sync file. Absent when none or cleared.
    */
@@ -115,10 +148,23 @@ export interface CardWorktree {
   repo: string
 }
 
+/** A worktree a card gets at its first open (#69 D10): only its new branch's name. */
+export interface PendingWorktree {
+  branch: string
+}
+
 /** A card created in its own worktree instead of the workspace's folder. */
 export interface NewCardWorktree {
   directory: string
   worktree: CardWorktree
+}
+
+/** How `board create` makes a card beyond what the New card dialog sets (#69 D8, D11). */
+export interface NewCardOptions {
+  /** Marks it `unopened`: made from a card in another workspace. */
+  unopened?: boolean
+  /** Its own worktree at its first open (#69 D10): a local workspace's card only. */
+  pendingWorktree?: PendingWorktree
 }
 
 export interface Workspace {
@@ -161,6 +207,11 @@ export interface Workspace {
   autoMove?: AutoMove
   /** Its own view; absent when it follows Settings' Default view (on each machine). */
   view?: WorkspaceView
+  /**
+   * Its Kanban columns recently opened first (#69 D12); absent for the manual board order. Saved
+   * and synced like `view`; the stored order is never changed by it.
+   */
+  sort?: 'recent'
 }
 
 /** A named shell in the workspace's folder, which types `command` (when set) each time it starts. */
@@ -240,6 +291,7 @@ export type ErrorField =
   | 'shell'
   | 'setup'
   | 'logo'
+  | 'description'
 
 export interface FieldError {
   field: ErrorField
@@ -282,6 +334,8 @@ export interface WorkspacePatch {
   autoMove?: AutoMove
   /** How it shows its cards, `default` to follow Settings; no card changes. */
   view?: WorkspaceViewChoice
+  /** How its Kanban columns order their cards (#69 D12); no card changes. */
+  sort?: WorkspaceSort
 }
 
 export type MoveDirection = 'left' | 'right'
@@ -306,16 +360,25 @@ export interface WorkspaceStore {
   /**
    * Adds a card at the bottom of the column; an empty title becomes `Terminal N`. `startup`
    * defaults to the workspace's default startup command (#5 D9, D10). With `worktree` (a local
-   * workspace only) the card runs in that worktree instead of the workspace's folder.
+   * workspace only) the card runs in that worktree instead of the workspace's folder. A
+   * `description` is kept as `setCardDescription` keeps it, and one over the cap refuses the card.
+   * `options` are `board create`'s (#69 D8, D11).
    */
   createCard(
     workspaceId: string,
     columnId: string,
     title: string,
     startup?: StartupCommand,
-    worktree?: NewCardWorktree
+    worktree?: NewCardWorktree,
+    description?: string,
+    options?: NewCardOptions
   ): Result<Card>
   renameCard(workspaceId: string, cardId: string, title: string): Result<Card>
+  /**
+   * Replaces the card's description (#69 D1, D4): trailing whitespace trimmed, empty removes it,
+   * longer than `MAX_DESCRIPTION_LENGTH` refused. Nothing is typed into its shell.
+   */
+  setCardDescription(workspaceId: string, cardId: string, text: string): Result<Card>
   deleteCard(workspaceId: string, cardId: string): Result<void>
   /**
    * Moves the card to `toColumnId` at `toIndex` (0 = top, counted among that column's cards
@@ -368,6 +431,11 @@ export interface WorkspaceStore {
    * folder) and no pending setup. A shell set to run in its worktree runs in the folder again.
    */
   moveCardOutOfWorktree(workspaceId: string, cardId: string): Result<Card>
+  /**
+   * Drops the card's pending worktree (#69 D10: Run in workspace folder): it runs in the
+   * workspace folder from its next start. A card without one is left as it is.
+   */
+  clearPendingWorktree(workspaceId: string, cardId: string): Result<Card>
   /**
    * Replaces every workspace with `workspaces` (a board from the sync folder, #13 D7, D14): the
    * active workspace stays active when it is still there, else the first one is (or none).
@@ -528,6 +596,8 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
     }
     const view = patch.view === undefined ? workspaceViewChoice(current) : patch.view
     if (!isWorkspaceViewChoice(view)) return fail('workspace', 'Unknown view')
+    const sort = patch.sort === undefined ? workspaceSort(current) : patch.sort
+    if (!isWorkspaceSort(sort)) return fail('workspace', 'Unknown sort')
     let autoMove = current.autoMove ?? null
     if (patch.autoMove !== undefined) {
       const columnIds = current.columns.map((c) => c.id)
@@ -547,6 +617,9 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
     // And no `view` key for one following the default.
     if (view === 'default') delete updated.view
     else updated.view = view
+    // And no `sort` key for the manual order (#69 D12).
+    if (sort === 'manual') delete updated.sort
+    else updated.sort = sort
     this.replace(updated)
     return { ok: true, value: updated }
   }
@@ -643,28 +716,41 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
     columnId: string,
     title: string,
     startup?: StartupCommand,
-    worktree?: NewCardWorktree
+    worktree?: NewCardWorktree,
+    description?: string,
+    options: NewCardOptions = {}
   ): Result<Card> {
     const ws = this.find(workspaceId)
     if (!ws) return unknownWorkspace()
     if (!ws.columns.some((c) => c.id === columnId)) return unknownColumn()
     const checked = checkCardStartup(startup ?? ws.defaultStartup)
     if (!checked.ok) return checked
+    const described = checkDescription(description ?? '')
+    if (!described.ok) return described
+    const pending = options.pendingWorktree
+    if (pending) {
+      if (ws.host !== undefined) return fail('card', 'An SSH card can’t have its own worktree')
+      const problem = branchProblem(pending.branch)
+      if (problem) return fail('card', problem)
+    }
     const trimmed = title.trim()
     const created: Card = {
       id: this.generateId(),
       columnId,
       title: trimmed || `Terminal ${ws.nextCardNumber}`,
+      ...(described.value !== undefined && { description: described.value }),
       directory: worktree && ws.host === undefined ? worktree.directory : ws.directory,
       ...(ws.host !== undefined && { host: ws.host }),
       ...(worktree && ws.host === undefined && { worktree: { ...worktree.worktree } }),
+      ...(pending && !worktree && { pendingWorktree: { branch: pending.branch } }),
       startup: checked.value,
       agentSessionId: this.generateSessionId(),
       claudeStarted: false,
       startedAgents: [],
       // Its worktree is new: the workspace's setup runs first, until it succeeds (#39 D2, D7).
       ...(worktree && ws.host === undefined && ws.worktreeSetup && { setup: ws.worktreeSetup }),
-      ...(this.now && { createdAt: this.now() })
+      ...(this.now && { createdAt: this.now() }),
+      ...(options.unopened && { unopened: true as const })
     }
     this.replace({
       ...ws,
@@ -684,6 +770,19 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
     const renamed: Card = { ...current, title: trimmed }
     this.replace({ ...ws, cards: ws.cards.map((c) => (c.id === cardId ? renamed : c)) })
     return { ok: true, value: renamed }
+  }
+
+  setCardDescription(workspaceId: string, cardId: string, text: string): Result<Card> {
+    const checked = checkDescription(text)
+    if (!checked.ok) return checked
+    const ws = this.find(workspaceId)
+    const current = ws?.cards.find((c) => c.id === cardId)
+    if (current && current.description === checked.value) return { ok: true, value: current }
+    return this.updateCard(workspaceId, cardId, (card) => {
+      const next: Card = { ...card, description: checked.value }
+      if (checked.value === undefined) delete next.description
+      return { ok: true, value: next }
+    })
   }
 
   deleteCard(workspaceId: string, cardId: string): Result<void> {
@@ -792,11 +891,13 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
   markCardOpened(workspaceId: string, cardId: string, at: number): Result<Card> {
     const current = this.find(workspaceId)?.cards.find((c) => c.id === cardId)
     // The same time again changes nothing, so nothing is saved.
-    if (current?.lastOpenedAt === at) return { ok: true, value: current }
-    return this.updateCard(workspaceId, cardId, (card) => ({
-      ok: true,
-      value: { ...card, lastOpenedAt: at }
-    }))
+    if (current?.lastOpenedAt === at && !current.unopened) return { ok: true, value: current }
+    return this.updateCard(workspaceId, cardId, (card) => {
+      // The first open clears the New mark in the same change (#69 D11).
+      const opened: Card = { ...card, lastOpenedAt: at }
+      delete opened.unopened
+      return { ok: true, value: opened }
+    })
   }
 
   setCardLastStatus(workspaceId: string, cardId: string, text: string): Result<Card> {
@@ -877,7 +978,20 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
         startedAgents: []
       }
       if (ws.worktreeSetup) moved.setup = ws.worktreeSetup
+      // A pending worktree (#69 D10) is made by this move.
+      delete moved.pendingWorktree
       return { ok: true, value: moved }
+    })
+  }
+
+  clearPendingWorktree(workspaceId: string, cardId: string): Result<Card> {
+    const current = this.find(workspaceId)?.cards.find((c) => c.id === cardId)
+    // None to drop changes nothing, so nothing is saved.
+    if (current && !current.pendingWorktree) return { ok: true, value: current }
+    return this.updateCard(workspaceId, cardId, (card) => {
+      const cleared: Card = { ...card }
+      delete cleared.pendingWorktree
+      return { ok: true, value: cleared }
     })
   }
 
