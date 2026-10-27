@@ -11,6 +11,7 @@ import {
   checkShell,
   checkWorktreeSetup,
   isShellType,
+  isWorkspaceView,
   type Card,
   type CardWorktree,
   type Column,
@@ -111,6 +112,8 @@ function readWorkspace(raw: unknown): Workspace | string {
     columns.map((c) => c.id)
   )
   if (autoMove === 'bad') return 'bad autoMove'
+  // Missing follows the default; so does a view this version doesn't know, from a newer one.
+  if (raw.view !== undefined && typeof raw.view !== 'string') return 'bad view'
   if (!Array.isArray(raw.cards)) return 'bad cards'
   const cards: Card[] = []
   for (const c of raw.cards) {
@@ -131,7 +134,8 @@ function readWorkspace(raw: unknown): Workspace | string {
     defaultStartup,
     shells,
     worktreeSetup: setup.value,
-    ...(autoMove !== null && { autoMove })
+    ...(autoMove !== null && { autoMove }),
+    ...(isWorkspaceView(raw.view) && { view: raw.view })
   }
 }
 
@@ -191,9 +195,14 @@ function readCard(raw: unknown): Card | string {
     agentSessionId,
     claudeStarted,
     startedAgents,
-    ...setup
+    ...setup,
+    ...(isTime(raw.createdAt) && { createdAt: raw.createdAt }),
+    ...(isTime(raw.lastOpenedAt) && { lastOpenedAt: raw.lastOpenedAt })
   }
 }
+
+/** A time in ms since the epoch; anything else is dropped, as if the card had none. */
+const isTime = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0
 
 /** `{}` without a pending setup; `{ setup }` for one trimmed, non-empty line (#39 D2, D8). */
 function readCardSetup(raw: unknown): { setup?: string } | string {

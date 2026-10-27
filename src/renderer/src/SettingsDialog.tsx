@@ -54,7 +54,14 @@ import { terminalTheme } from '../../core/terminal-themes'
 import type { ShellChoices } from '../../shared/api'
 import { APP_FONT_CHOICES, UI_FONT_STACK, appFontChoiceOf, appFontOf } from '../../core/app-fonts'
 import { FONT_CHOICES, familyOf, fontChoiceOf } from '../../core/font-choices'
-import { FONT_SIZE_ERROR, fontFamilyField, parseFontSize } from '../../core/settings-form'
+import {
+  COLUMN_CARD_LIMIT_ERROR,
+  FONT_SIZE_ERROR,
+  fontFamilyField,
+  parseColumnCardLimit,
+  parseFontSize
+} from '../../core/settings-form'
+import { MAX_COLUMN_CARD_LIMIT, MIN_COLUMN_CARD_LIMIT } from '../../core/column-limit'
 import { syncFolderOf, syncStatusText } from '../../core/sync-status'
 import { ghosttyStore, useGhosttyTheme } from './ghostty'
 import { installedAppFonts, installedFonts } from './installed-fonts'
@@ -65,6 +72,7 @@ import { settingsStore, useSettings } from './settings'
 import TerminalPreview from './TerminalPreview'
 import ThemePicker from './ThemePicker'
 import AppThemePicker from './AppThemePicker'
+import { VIEWS } from './workspace-views'
 import { useSyncStatus } from './sync'
 
 export const SYNC_FOLDER_ERROR = 'Folder not found'
@@ -281,7 +289,118 @@ function AppearanceSection({
         onPick={(appTheme) => settingsStore.update({ appTheme })}
       />
       <AppFontRow draft={appFont} setDraft={setAppFont} />
+      <fieldset className="settings-row">
+        <legend className="settings-label">Default view</legend>
+        <div className="settings-control">
+          <div className="segmented">
+            {VIEWS.map(([view, label, Icon]) => (
+              <label key={view} className="radio">
+                <input
+                  type="radio"
+                  name={`${id}-view`}
+                  value={view}
+                  data-testid={`settings-view-${view}`}
+                  checked={settings.defaultView === view}
+                  onChange={() => settingsStore.update({ defaultView: view, viewChosen: true })}
+                />
+                <Icon {...SMALL_ICON} />
+                {label}
+              </label>
+            ))}
+          </div>
+          <p className="field-hint">
+            Workspaces set to Default show this view. A workspace can pick its own in its Edit
+            dialog.
+          </p>
+        </div>
+      </fieldset>
+      <CardsPerColumnRow />
     </>
+  )
+}
+
+/**
+ * Card display limit: how many cards a board column or grid section shows before its Show all button, 1 to 100,
+ * saved as typed while valid, or stepped with the buttons and the arrow keys.
+ */
+function CardsPerColumnRow(): React.JSX.Element {
+  const settings = useSettings()
+  const id = useId()
+  const [text, setText] = useState(() => String(settingsStore.get().columnCardLimit))
+  const [invalid, setInvalid] = useState(false)
+  const change = (next: string): void => {
+    setText(next)
+    const limit = parseColumnCardLimit(next)
+    setInvalid(limit === null)
+    if (limit !== null) settingsStore.update({ columnCardLimit: limit })
+  }
+  const step = (by: number): void => {
+    const limit = Math.min(
+      MAX_COLUMN_CARD_LIMIT,
+      Math.max(MIN_COLUMN_CARD_LIMIT, settings.columnCardLimit + by)
+    )
+    change(String(limit))
+  }
+  const inputId = `${id}-limit`
+  const errorId = `${id}-limit-error`
+  return (
+    <div className="settings-row">
+      <label className="settings-label" htmlFor={inputId}>
+        Card display limit
+      </label>
+      <div className="settings-control">
+        <div className="stepper">
+          <button
+            type="button"
+            className="stepper-btn"
+            aria-label="Lower card display limit"
+            disabled={settings.columnCardLimit <= MIN_COLUMN_CARD_LIMIT}
+            onClick={() => step(-1)}
+          >
+            <Minus {...SMALL_ICON} />
+          </button>
+          <input
+            id={inputId}
+            className="stepper-input"
+            data-testid="settings-column-card-limit"
+            inputMode="numeric"
+            value={text}
+            autoComplete="off"
+            aria-invalid={invalid ? true : undefined}
+            aria-describedby={invalid ? errorId : `${id}-limit-hint`}
+            onChange={(e) => change(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
+              e.preventDefault()
+              step(e.key === 'ArrowUp' ? 1 : -1)
+            }}
+          />
+          <button
+            type="button"
+            className="stepper-btn"
+            aria-label="Raise card display limit"
+            disabled={settings.columnCardLimit >= MAX_COLUMN_CARD_LIMIT}
+            onClick={() => step(1)}
+          >
+            <Plus {...SMALL_ICON} />
+          </button>
+        </div>
+        {invalid ? (
+          <p
+            className="field-error"
+            id={errorId}
+            role="alert"
+            data-testid="settings-error-column-card-limit"
+          >
+            {COLUMN_CARD_LIMIT_ERROR}
+          </p>
+        ) : (
+          <p className="field-hint" id={`${id}-limit-hint`}>
+            A Kanban column or a grid section shows this many cards, then Show all.
+          </p>
+        )}
+      </div>
+    </div>
   )
 }
 

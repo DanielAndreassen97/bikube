@@ -23,6 +23,7 @@ export const IPC = {
   resize: 'terminal:resize',
   kill: 'terminal:kill',
   ack: 'terminal:ack',
+  foreground: 'terminal:foreground',
   data: 'terminal:data',
   exit: 'terminal:exit',
   clipboardRead: 'clipboard:read',
@@ -130,6 +131,12 @@ export interface TerminalApi {
   /** Returns an unsubscribe function. */
   onData(listener: (id: string, data: string) => void): () => void
   onExit(listener: (exit: TerminalExit) => void): () => void
+}
+
+/** The terminal API with main's reads that `CardSessions` and `CardPanes` don't need. */
+export interface TerminalReadApi extends TerminalApi {
+  /** The name of the program in the session's foreground (node-pty's), or null when unknown. */
+  foreground(id: string): Promise<string | null>
 }
 
 /** System clipboard text, owned by main; the renderer has no direct access. */
@@ -429,6 +436,8 @@ export interface BikubeApi {
    * shorter one only the development build takes from `BIKUBE_LONG_COMMAND_MS`, for the tests.
    */
   longCommandMs: number
+  /** The first launch's view prompt never shows: the smoke tests' development build only. */
+  noViewPrompt: boolean
   /** This machine's host name (`os.hostname()`), for OSC 7's host (#45 D8); empty if unknown. */
   hostName: string
   /**
@@ -436,7 +445,7 @@ export interface BikubeApi {
    * paint; the settings hold the current one.
    */
   appTheme: AppThemeId
-  terminal: TerminalApi
+  terminal: TerminalReadApi
   clipboard: ClipboardApi
   link: LinkApi
   ports: PortsApi

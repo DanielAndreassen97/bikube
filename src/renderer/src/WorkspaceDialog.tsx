@@ -1,4 +1,4 @@
-import { Laptop, Server, type LucideIcon } from 'lucide-react'
+import { Laptop, Server, Settings2, type LucideIcon } from 'lucide-react'
 import { useId, useState } from 'react'
 import {
   applyDirectory,
@@ -18,10 +18,14 @@ import { WORKSPACE_LOGOS, type WorkspaceLogoId } from '../../core/workspace-logo
 import {
   checkWorktreeSetup,
   defaultWorkspaceName,
-  type Workspace
+  workspaceViewChoice,
+  type Workspace,
+  type WorkspaceViewChoice
 } from '../../core/workspace-store'
 import { SMALL_ICON } from './icons'
 import Modal from './Modal'
+import { useSettings } from './settings'
+import { VIEWS } from './workspace-views'
 import StartupField from './StartupField'
 import { workspaceStore } from './store'
 import { workspaceInitial } from './workspace-initial'
@@ -76,6 +80,12 @@ function WorkspaceDialog({
   const [setupError, setSetupError] = useState<string | undefined>(undefined)
   // The sidebar badge's icon (#59 D3); null is None, the name's initial.
   const [logo, setLogo] = useState<WorkspaceLogoId | null>(workspace?.logo ?? null)
+  // How it shows its cards: Default (Settings' Default view, live) for a new workspace.
+  const [view, setView] = useState<WorkspaceViewChoice>(() =>
+    workspace ? workspaceViewChoice(workspace) : 'default'
+  )
+  const { defaultView } = useSettings()
+  const defaultLabel = VIEWS.find(([v]) => v === defaultView)?.[1] ?? ''
   // The automatic move rules (#42 D6): edited here, stored only on Save.
   const [autoMove, setAutoMove] = useState<AutoMove>(workspace?.autoMove ?? {})
   // The board's columns as they are now, so a rename or delete while the dialog is open shows.
@@ -117,6 +127,7 @@ function WorkspaceDialog({
         defaultStartup: command.value,
         ...(checkedSetup && { worktreeSetup: checkedSetup.value }),
         logo,
+        view,
         // A rule whose column went while the dialog was open is off (#42 D2).
         ...(workspace && {
           autoMove:
@@ -316,6 +327,37 @@ function WorkspaceDialog({
             })}
           </div>
         </fieldset>
+        <fieldset className="field radio-group">
+          <legend>View</legend>
+          <div className="segmented segmented-fit">
+            <label className="radio">
+              <input
+                type="radio"
+                name={`${id}-view`}
+                value="default"
+                data-testid="workspace-view-default"
+                checked={view === 'default'}
+                onChange={() => setView('default')}
+              />
+              <Settings2 {...SMALL_ICON} />
+              {`Default (${defaultLabel})`}
+            </label>
+            {VIEWS.map(([value, label, Icon]) => (
+              <label key={value} className="radio">
+                <input
+                  type="radio"
+                  name={`${id}-view`}
+                  value={value}
+                  data-testid={`workspace-view-${value}`}
+                  checked={view === value}
+                  onChange={() => setView(value)}
+                />
+                <Icon {...SMALL_ICON} />
+                {label}
+              </label>
+            ))}
+          </div>
+        </fieldset>
         <StartupField
           draft={startup}
           onChange={(next) => {
@@ -371,7 +413,8 @@ function WorkspaceDialog({
             )}
           </div>
         )}
-        {workspace && (
+        {/* Grid shows no columns: its rules stay saved for Kanban but are hidden and not run. */}
+        {workspace && (view === 'default' ? defaultView : view) === 'kanban' && (
           <fieldset className="field radio-group auto-move">
             <legend>Move cards automatically</legend>
             {AUTO_MOVE_RULES.map(([trigger, label]) => (

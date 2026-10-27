@@ -62,6 +62,7 @@ function input(state: WorkspaceState, extra: Partial<PaletteInput> = {}): Palett
     view: null,
     theme: 'system',
     appTheme: 'default',
+    defaultView: 'kanban',
     keymap: defaultKeymap('linux'),
     platform: 'linux',
     waiting: [],
@@ -193,6 +194,7 @@ describe('paletteItems actions (#40 D6)', () => {
   const APP_ROWS = [
     'New card',
     'New shell',
+    'View: Grid',
     'New workspace',
     'Open Settings',
     'Theme: Dark',
@@ -439,7 +441,8 @@ describe('paletteItems Next waiting card (#41 D7)', () => {
     const shown = labels(i)
     expect(shown.slice(shown.indexOf('New shell'), shown.indexOf('New workspace'))).toEqual([
       'New shell',
-      'Next waiting card'
+      'Next waiting card',
+      'View: Grid'
     ])
     expect(paletteItems(i).actions.find((r) => r.label === 'Next waiting card')).toEqual({
       kind: 'action',
@@ -519,5 +522,40 @@ describe('filterPalette (#40 D4)', () => {
       'refactor billing',
       'billing report'
     ])
+  })
+})
+
+describe('paletteItems workspace view', () => {
+  it("offers the active workspace's other view, and no column moves in the grid", () => {
+    const alpha = workspace('a', 'Alpha', [card('c1', 'build')])
+    const kanban = paletteItems(input({ workspaces: [alpha], activeId: 'a' })).actions
+    expect(kanban.find((r) => r.action.id === 'workspaceView')).toEqual({
+      kind: 'action',
+      action: { id: 'workspaceView', view: 'grid' },
+      label: 'View: Grid'
+    })
+    const grid: WorkspaceState = { workspaces: [{ ...alpha, view: 'grid' }], activeId: 'a' }
+    const view: OpenView = {
+      kind: 'card',
+      workspaceId: 'a',
+      cardId: 'c1',
+      running: true,
+      paneCount: 1,
+      extraPaneFocused: false,
+      focusedPaneHasScreen: true
+    }
+    const rows = paletteItems(input(grid, { view })).actions
+    expect(rows.find((r) => r.action.id === 'workspaceView')?.label).toBe('View: Kanban')
+    expect(rows.some((r) => r.action.id === 'moveCard')).toBe(false)
+    // Without its own view, the workspace follows Settings' Default view.
+    const followsGrid = paletteItems(
+      input({ workspaces: [alpha], activeId: 'a' }, { defaultView: 'grid' })
+    )
+    expect(followsGrid.actions.find((r) => r.action.id === 'workspaceView')?.label).toBe(
+      'View: Kanban'
+    )
+    expect(
+      paletteItems(input({ workspaces: [], activeId: null })).actions.map((r) => r.label)
+    ).not.toContain('View: Grid')
   })
 })

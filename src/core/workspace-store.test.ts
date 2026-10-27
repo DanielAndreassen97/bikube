@@ -4,6 +4,8 @@ import {
   InMemoryWorkspaceStore,
   basename,
   cardsInColumn,
+  workspaceView,
+  workspaceViewChoice,
   type Card,
   type Column,
   type Result,
@@ -1427,5 +1429,62 @@ describe('temporary shells (#66 D2, D3)', () => {
     // A named shell is never temporary.
     const named = ok(s.createShell(w.id, { name: 'Dev', command: '', autostart: false }))
     expect(named.temporary).toBeUndefined()
+  })
+})
+
+describe('workspace views and card open times', () => {
+  it('creates a workspace following the default with no view key, or with its own view', () => {
+    const s = make()
+    expect('view' in create(s, 'alpha')).toBe(false)
+    expect(
+      'view' in ok(s.createWorkspace({ name: 'b', directory: '/tmp/b', view: 'default' }))
+    ).toBe(false)
+    expect(ok(s.createWorkspace({ name: 'c', directory: '/tmp/c', view: 'grid' })).view).toBe(
+      'grid'
+    )
+    expect(ok(s.createWorkspace({ name: 'd', directory: '/tmp/d', view: 'kanban' })).view).toBe(
+      'kanban'
+    )
+  })
+
+  it("shows its own view, or without one Settings' default", () => {
+    expect(workspaceView({}, 'grid')).toBe('grid')
+    expect(workspaceView({ view: 'kanban' }, 'grid')).toBe('kanban')
+    expect(workspaceViewChoice({})).toBe('default')
+    expect(workspaceViewChoice({ view: 'grid' })).toBe('grid')
+  })
+
+  it('switches a workspace between views without changing any card', () => {
+    const s = make()
+    const w = create(s, 'alpha')
+    card(s, w, 'api', 1)
+    const before = s.getState().workspaces[0].cards
+    expect(ok(s.updateWorkspace(w.id, { view: 'grid' })).view).toBe('grid')
+    expect(s.getState().workspaces[0].cards).toBe(before)
+    expect(ok(s.updateWorkspace(w.id, { view: 'kanban' })).view).toBe('kanban')
+    expect('view' in ok(s.updateWorkspace(w.id, { view: 'default' }))).toBe(false)
+    expect(s.getState().workspaces[0].cards).toBe(before)
+    expect(s.updateWorkspace(w.id, { view: 'list' as never })).toMatchObject({ ok: false })
+  })
+
+  it("stamps a new card's creation with the store's clock, and none without one", () => {
+    const plain = make()
+    expect('createdAt' in card(plain, create(plain, 'x'), 'api')).toBe(false)
+    const s = new InMemoryWorkspaceStore({ now: () => 1000 })
+    const w = create(s, 'alpha')
+    const api = card(s, w, 'api')
+    expect(api.createdAt).toBe(1000)
+    expect('lastOpenedAt' in api).toBe(false)
+  })
+
+  it('records when a card is opened, changing nothing else', () => {
+    const s = make()
+    const w = create(s, 'alpha')
+    const api = card(s, w, 'api')
+    expect(ok(s.markCardOpened(w.id, api.id, 5))).toEqual({ ...api, lastOpenedAt: 5 })
+    const state = s.getState()
+    ok(s.markCardOpened(w.id, api.id, 5))
+    expect(s.getState()).toBe(state)
+    expect(s.markCardOpened(w.id, 'nope', 5)).toMatchObject({ ok: false, error: { field: 'card' } })
   })
 })

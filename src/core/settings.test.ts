@@ -779,3 +779,52 @@ describe('the App font preference (#66 D7, AC8)', () => {
     expect(validateSettings({ ...base, appFontFamily: 'x'.repeat(200) }, 'linux')).not.toBeNull()
   })
 })
+
+describe('the default view and the view prompt preferences', () => {
+  const file = (settings: unknown): string => JSON.stringify({ version: 1, settings })
+  const base: Settings = { theme: 'dark', fontSize: 13, fontFamily: 'Menlo', ...NEW_FIELDS }
+
+  it('default to Kanban and not chosen, writing no keys for them', () => {
+    const read = parseSettingsFile(file({ theme: 'dark' }), 'linux').settings
+    expect([read.defaultView, read.viewChosen]).toEqual(['kanban', false])
+    const written = JSON.parse(serializeSettings(base)).settings
+    expect(written).not.toHaveProperty('defaultView')
+    expect(written).not.toHaveProperty('viewChosen')
+  })
+
+  it('write Grid and a chosen view, and read them back', () => {
+    const text = serializeSettings({ ...base, defaultView: 'grid', viewChosen: true })
+    expect(JSON.parse(text).settings).toMatchObject({ defaultView: 'grid', viewChosen: true })
+    const read = parseSettingsFile(text, 'linux').settings
+    expect([read.defaultView, read.viewChosen]).toEqual(['grid', true])
+  })
+
+  it('refuse an unknown view', () => {
+    expect(validateSettings({ ...base, defaultView: 'list' }, 'linux')).toBeNull()
+    const parsed = parseSettingsFile(file({ ...base, defaultView: 'list' }), 'linux')
+    expect(parsed.settings.defaultView).toBe('kanban')
+    expect(parsed.replaced).toEqual(['defaultView'])
+  })
+})
+
+describe('the Card display limit preference', () => {
+  const file = (settings: unknown): string => JSON.stringify({ version: 1, settings })
+  const base: Settings = { theme: 'dark', fontSize: 13, fontFamily: 'Menlo', ...NEW_FIELDS }
+
+  it('is 10 by default, written only when it differs, and read back', () => {
+    expect(parseSettingsFile(file({ theme: 'dark' }), 'linux').settings.columnCardLimit).toBe(10)
+    expect(JSON.parse(serializeSettings(base)).settings).not.toHaveProperty('columnCardLimit')
+    const text = serializeSettings({ ...base, columnCardLimit: 25 })
+    expect(JSON.parse(text).settings.columnCardLimit).toBe(25)
+    expect(parseSettingsFile(text, 'linux').settings.columnCardLimit).toBe(25)
+  })
+
+  it('refuses a number outside 1 to 100 or not whole', () => {
+    for (const value of [0, 101, 2.5, '10']) {
+      expect(validateSettings({ ...base, columnCardLimit: value }, 'linux')).toBeNull()
+      const parsed = parseSettingsFile(file({ ...base, columnCardLimit: value }), 'linux')
+      expect(parsed.settings.columnCardLimit).toBe(10)
+      expect(parsed.replaced).toEqual(['columnCardLimit'])
+    }
+  })
+})

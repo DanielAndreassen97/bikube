@@ -18,6 +18,35 @@ import {
 
 export const DEFAULT_COLUMN_NAMES = ['Backlog', 'In Progress', 'Review', 'Done'] as const
 
+/**
+ * How a workspace shows its cards: `kanban`, its columns as lanes, or `grid`, every card in one
+ * grid, latest first. Cards keep their columns in both, so switching changes no card.
+ */
+export const WORKSPACE_VIEWS = ['kanban', 'grid'] as const
+export type WorkspaceView = (typeof WORKSPACE_VIEWS)[number]
+
+export const isWorkspaceView = (value: unknown): value is WorkspaceView =>
+  (WORKSPACE_VIEWS as readonly unknown[]).includes(value)
+
+/** A workspace's View setting: `default` follows Settings' Default view, else its own. */
+export type WorkspaceViewChoice = 'default' | WorkspaceView
+
+export const isWorkspaceViewChoice = (value: unknown): value is WorkspaceViewChoice =>
+  value === 'default' || isWorkspaceView(value)
+
+/**
+ * The view the workspace shows: its own, or without one (Default, as in files from before views)
+ * the app's `defaultView`, this machine's setting.
+ */
+export const workspaceView = (
+  workspace: Pick<Workspace, 'view'>,
+  defaultView: WorkspaceView
+): WorkspaceView => workspace.view ?? defaultView
+
+/** The workspace's View setting as its dialog shows it. */
+export const workspaceViewChoice = (workspace: Pick<Workspace, 'view'>): WorkspaceViewChoice =>
+  workspace.view ?? 'default'
+
 export interface Column {
   id: string
   name: string
@@ -55,6 +84,16 @@ export interface Card {
    * Absent when none. Saved, never synced (D8).
    */
   setup?: string
+  /**
+   * When it was created, in ms since the epoch, never changed: synced, so the grid view orders a
+   * card from another machine too. Absent for cards from before it.
+   */
+  createdAt?: number
+  /**
+   * When it was last opened on this machine, in ms since the epoch: saved, never synced, since
+   * every open would write the sync file. The grid shows the latest of the two first.
+   */
+  lastOpenedAt?: number
   /** Only a workspace shell's card-shaped record (never stored): see `StartupState`. */
   exitAfterStartup?: boolean
 }
@@ -112,6 +151,8 @@ export interface Workspace {
    * rule is off. Deleting a column turns off the rules naming it.
    */
   autoMove?: AutoMove
+  /** Its own view; absent when it follows Settings' Default view (on each machine). */
+  view?: WorkspaceView
 }
 
 /** A named shell in the workspace's folder, which types `command` (when set) each time it starts. */
@@ -211,6 +252,8 @@ export interface WorkspaceInput {
   worktreeSetup?: string
   /** One of `WORKSPACE_LOGOS` (#59 D1); absent or null means none. */
   logo?: WorkspaceLogoId | null
+  /** Defaults to `default`, following Settings' Default view. */
+  view?: WorkspaceViewChoice
 }
 
 export interface WorkspacePatch {
@@ -229,6 +272,8 @@ export interface WorkspacePatch {
    * of this workspace; `{}` turns them all off.
    */
   autoMove?: AutoMove
+  /** How it shows its cards, `default` to follow Settings; no card changes. */
+  view?: WorkspaceViewChoice
 }
 
 export type MoveDirection = 'left' | 'right'
@@ -270,6 +315,8 @@ export interface WorkspaceStore {
    * the card's column and position change (#6 D3, D4).
    */
   moveCard(workspaceId: string, cardId: string, toColumnId: string, toIndex: number): Result<void>
+  /** Records that the card was opened at `at` (ms since the epoch), for the grid's order. */
+  markCardOpened(workspaceId: string, cardId: string, at: number): Result<Card>
   /** Changes only the setting, used at the card's next start (#5 D11). */
   setCardStartup(workspaceId: string, cardId: string, startup: StartupCommand): Result<Card>
   /** Adds a shell at the end of the workspace's shells; name required, command one line or ''. */
@@ -319,6 +366,8 @@ export interface StoreOptions {
   generateSessionId?: () => string
   /** State to start from, e.g. the saved state (#8 D5); defaults to no workspaces. */
   initialState?: WorkspaceState
+  /** The clock a new card's `createdAt` is read from; without one, cards get none. */
+  now?: () => number
 }
 
 /** Last path segment, ignoring trailing separators (POSIX and Windows). */
@@ -367,6 +416,7 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
   private readonly validateDirectory: (directory: string) => string | null
   private readonly generateId: () => string
   private readonly generateSessionId: () => string
+  private readonly now: (() => number) | undefined
   private counter = 0
 
   constructor(options: StoreOptions = {}) {
@@ -374,6 +424,7 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
     this.validateDirectory = options.validateDirectory ?? (() => null)
     this.generateId = options.generateId ?? (() => `id-${++this.counter}`)
     this.generateSessionId = options.generateSessionId ?? (() => globalThis.crypto.randomUUID())
+    this.now = options.now
   }
 
   getState(): WorkspaceState {
@@ -410,7 +461,8 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
       nextCardNumber: 1,
       defaultStartup: startup.value,
       shells: [],
-      worktreeSetup: setup.value
+      worktreeSetup: setup.value,
+      ...(isWorkspaceView(input.view) && { view: input.view })
     }
     this.set({
       workspaces: [...this.state.workspaces, workspace],
@@ -456,6 +508,8 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
       if (!checked.ok) return checked
       logo = checked.value
     }
+    const view = patch.view === undefined ? workspaceViewChoice(current) : patch.view
+    if (!isWorkspaceViewChoice(view)) return fail('workspace', 'Unknown view')
     let autoMove = current.autoMove ?? null
     if (patch.autoMove !== undefined) {
       const columnIds = current.columns.map((c) => c.id)
@@ -472,6 +526,9 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
     // And no `autoMove` key with every rule off (#42 D2).
     if (autoMove === null) delete updated.autoMove
     else updated.autoMove = autoMove
+    // And no `view` key for one following the default.
+    if (view === 'default') delete updated.view
+    else updated.view = view
     this.replace(updated)
     return { ok: true, value: updated }
   }
@@ -588,7 +645,8 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
       claudeStarted: false,
       startedAgents: [],
       // Its worktree is new: the workspace's setup runs first, until it succeeds (#39 D2, D7).
-      ...(worktree && ws.host === undefined && ws.worktreeSetup && { setup: ws.worktreeSetup })
+      ...(worktree && ws.host === undefined && ws.worktreeSetup && { setup: ws.worktreeSetup }),
+      ...(this.now && { createdAt: this.now() })
     }
     this.replace({
       ...ws,
@@ -711,6 +769,16 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
     if (!ws) return unknownWorkspace()
     this.replace({ ...ws, shells: ws.shells.filter((s) => s.id !== shellId) })
     return { ok: true, value: undefined }
+  }
+
+  markCardOpened(workspaceId: string, cardId: string, at: number): Result<Card> {
+    const current = this.find(workspaceId)?.cards.find((c) => c.id === cardId)
+    // The same time again changes nothing, so nothing is saved.
+    if (current?.lastOpenedAt === at) return { ok: true, value: current }
+    return this.updateCard(workspaceId, cardId, (card) => ({
+      ok: true,
+      value: { ...card, lastOpenedAt: at }
+    }))
   }
 
   setCardStartup(workspaceId: string, cardId: string, startup: StartupCommand): Result<Card> {
