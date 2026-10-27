@@ -7,6 +7,7 @@
 
 import type { AgentKind } from './agent-presets'
 import { keepKnownRules, rulesNameKnownColumns, type AutoMove } from './auto-move'
+import type { ClaudeUsage } from './claude-usage-types'
 import { checkHost, checkRemoteDirectory } from './ssh-location'
 import { isWorkspaceLogo, type WorkspaceLogoId } from './workspace-logos'
 import {
@@ -94,6 +95,13 @@ export interface Card {
    * every open would write the sync file. The grid shows the latest of the two first.
    */
   lastOpenedAt?: number
+  /**
+   * Its last `board status` text (cleaned), shown on it once Stopped, also after a restart: saved,
+   * never synced, since every status would write the sync file. Absent when none or cleared.
+   */
+  lastStatus?: string
+  /** Its last usage report (#50), kept across a restart: saved, never synced. */
+  lastUsage?: ClaudeUsage
   /** Only a workspace shell's card-shaped record (never stored): see `StartupState`. */
   exitAfterStartup?: boolean
 }
@@ -317,6 +325,10 @@ export interface WorkspaceStore {
   moveCard(workspaceId: string, cardId: string, toColumnId: string, toIndex: number): Result<void>
   /** Records that the card was opened at `at` (ms since the epoch), for the grid's order. */
   markCardOpened(workspaceId: string, cardId: string, at: number): Result<Card>
+  /** Keeps the card's last status text for when it is Stopped; '' forgets it. */
+  setCardLastStatus(workspaceId: string, cardId: string, text: string): Result<Card>
+  /** Keeps the card's last usage report; null, or one with no tokens, forgets it. */
+  setCardLastUsage(workspaceId: string, cardId: string, usage: ClaudeUsage | null): Result<Card>
   /** Changes only the setting, used at the card's next start (#5 D11). */
   setCardStartup(workspaceId: string, cardId: string, startup: StartupCommand): Result<Card>
   /** Adds a shell at the end of the workspace's shells; name required, command one line or ''. */
@@ -350,6 +362,12 @@ export interface WorkspaceStore {
    * conversations per folder, so the card gets a new agent session and starts its agent afresh.
    */
   moveCardToWorktree(workspaceId: string, cardId: string, worktree: NewCardWorktree): Result<Card>
+  /**
+   * The reverse, once its worktree is removed or gone: the card runs in the workspace folder, on
+   * whatever branch is checked out there, with a new agent session (agents keep conversations per
+   * folder) and no pending setup. A shell set to run in its worktree runs in the folder again.
+   */
+  moveCardOutOfWorktree(workspaceId: string, cardId: string): Result<Card>
   /**
    * Replaces every workspace with `workspaces` (a board from the sync folder, #13 D7, D14): the
    * active workspace stays active when it is still there, else the first one is (or none).
@@ -781,6 +799,30 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
     }))
   }
 
+  setCardLastStatus(workspaceId: string, cardId: string, text: string): Result<Card> {
+    const current = this.find(workspaceId)?.cards.find((c) => c.id === cardId)
+    // The same text again changes nothing, so nothing is saved.
+    if (current && (current.lastStatus ?? '') === text) return { ok: true, value: current }
+    return this.updateCard(workspaceId, cardId, (card) => {
+      const next: Card = { ...card, lastStatus: text }
+      if (!text) delete next.lastStatus
+      return { ok: true, value: next }
+    })
+  }
+
+  setCardLastUsage(workspaceId: string, cardId: string, usage: ClaudeUsage | null): Result<Card> {
+    const kept = usage && usage.tokens > 0 ? usage : undefined
+    const current = this.find(workspaceId)?.cards.find((c) => c.id === cardId)
+    if (current && JSON.stringify(current.lastUsage) === JSON.stringify(kept)) {
+      return { ok: true, value: current }
+    }
+    return this.updateCard(workspaceId, cardId, (card) => {
+      const next: Card = { ...card, lastUsage: kept }
+      if (!kept) delete next.lastUsage
+      return { ok: true, value: next }
+    })
+  }
+
   setCardStartup(workspaceId: string, cardId: string, startup: StartupCommand): Result<Card> {
     const checked = checkCardStartup(startup)
     return this.updateCard(workspaceId, cardId, (card) =>
@@ -835,6 +877,24 @@ export class InMemoryWorkspaceStore implements WorkspaceStore {
         startedAgents: []
       }
       if (ws.worktreeSetup) moved.setup = ws.worktreeSetup
+      return { ok: true, value: moved }
+    })
+  }
+
+  moveCardOutOfWorktree(workspaceId: string, cardId: string): Result<Card> {
+    const ws = this.find(workspaceId)
+    if (!ws) return unknownWorkspace()
+    return this.updateCard(workspaceId, cardId, (card) => {
+      if (!card.worktree) return fail('card', 'The card has no worktree of its own')
+      const moved: Card = {
+        ...card,
+        directory: ws.directory,
+        agentSessionId: this.generateSessionId(),
+        claudeStarted: false,
+        startedAgents: []
+      }
+      delete moved.worktree
+      delete moved.setup
       return { ok: true, value: moved }
     })
   }

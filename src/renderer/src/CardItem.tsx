@@ -1,6 +1,7 @@
 import { ToolIcon } from './AgentLogo'
 import {
   AppWindow,
+  FolderX,
   GitBranch,
   GitMerge,
   GitPullRequest,
@@ -33,6 +34,7 @@ import MergeCardDialog, { type MergeChoice } from './MergeCardDialog'
 import { MENU_ICON, SMALL_ICON } from './icons'
 import MenuButton from './MenuButton'
 import MoveToWorktreeDialog from './MoveToWorktreeDialog'
+import RemoveWorktreeDialog from './RemoveWorktreeDialog'
 import StartupDialog from './StartupDialog'
 import StatusIcon from './StatusIcon'
 import {
@@ -395,6 +397,7 @@ function CardItem({
   const canMoveToWorktree = !running && inRepo !== null && inRepo !== undefined
   const [movingToWorktree, setMovingToWorktree] = useState(false)
   const [deletingWorktree, setDeletingWorktree] = useState(false)
+  const [removingWorktree, setRemovingWorktree] = useState(false)
   const [merging, setMerging] = useState<MergeChoice | null>(null)
   const merge = ({ cardBranch, branch }: MergeChoice): void => {
     setMerging(null)
@@ -438,7 +441,12 @@ function CardItem({
             onCommit={(title) => workspaceStore.renameCard(workspaceId, card.id, title)}
             onDone={() => setRenaming(false)}
           />
-          <CardLines status={status} usage={usage} inWindow={inWindow} />
+          <CardLines
+            status={status}
+            usage={usage}
+            lastStatus={card.lastStatus}
+            inWindow={inWindow}
+          />
         </div>
       ) : (
         <button
@@ -468,7 +476,12 @@ function CardItem({
             </span>
             {card.worktree && <WorktreeBranch branch={card.worktree.branch} worktree />}
           </span>
-          <CardLines status={status} usage={usage} inWindow={inWindow} />
+          <CardLines
+            status={status}
+            usage={usage}
+            lastStatus={card.lastStatus}
+            inWindow={inWindow}
+          />
         </button>
       )}
       {card.worktree && <PullRequestChip worktree={card.worktree} />}
@@ -584,6 +597,21 @@ function CardItem({
                 }}
               />
             )}
+            {card.worktree && card.host === undefined && !running && (
+              <button
+                type="button"
+                role="menuitem"
+                className="menu-item"
+                data-testid="card-menu-remove-worktree"
+                onClick={run(() => {
+                  cancelPendingOpen()
+                  setRemovingWorktree(true)
+                })}
+              >
+                <FolderX {...MENU_ICON} />
+                Remove worktree…
+              </button>
+            )}
             {running && (
               <button
                 type="button"
@@ -663,6 +691,13 @@ function CardItem({
           workspaceId={workspaceId}
           card={card}
           onDone={() => setMovingToWorktree(false)}
+        />
+      )}
+      {removingWorktree && card.worktree && (
+        <RemoveWorktreeDialog
+          workspaceId={workspaceId}
+          card={{ ...card, worktree: card.worktree }}
+          onDone={() => setRemovingWorktree(false)}
         />
       )}
       {merging && card.worktree && (
