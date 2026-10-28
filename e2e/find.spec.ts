@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { backToBoard, boardCard, expectCardOpen, SHORTCUTS, splitRight } from './card-view'
+import { clipboardWrites, recordClipboardWrites } from './clipboard-writes'
 import { launchApp, removeDataDirs } from './launch'
 import { plainCards } from './plain-cards'
 import { showShells } from './shells-tab'
@@ -142,11 +143,14 @@ test('#35 AC1: Find opens the bar in the pane and finds as you type, newest matc
   await page.keyboard.type('alpha')
   await expect(result()).toHaveText('1 of 3')
 
-  // The bar is in the pane's top-right corner.
+  // The bar is in the pane's top-right corner, just left of its Close card ×.
   const pane = (await page.getByTestId('pane').boundingBox())!
   const box = (await bar().boundingBox())!
+  const close = (await page.getByTestId('pane-close-card').boundingBox())!
   expect(box.y - pane.y).toBeLessThan(12)
-  expect(pane.x + pane.width - (box.x + box.width)).toBeLessThan(12)
+  expect(box.x + box.width).toBeLessThanOrEqual(close.x + 1)
+  expect(close.x - (box.x + box.width)).toBeLessThan(12)
+  expect(pane.x + pane.width - (close.x + close.width)).toBeLessThan(12)
 
   // The active match is the alpha on the last of those lines.
   const lines = await bufferLines()
@@ -288,7 +292,7 @@ test('#35 AC6: every match is highlighted, the active one filled; closing leaves
   expect(new Set(tops).size).toBe(3)
   // The doubled one is the newest match, the active one.
   expect(tops.at(-1)).toBe(tops.at(-2))
-  await page.getByRole('button', { name: 'Close' }).click()
+  await page.getByRole('button', { name: 'Close', exact: true }).click()
   await expect(bar()).toHaveCount(0)
   await expect(decorations()).toHaveCount(0)
   expect(await selection()).toEqual({ text: '', row: -1 })
@@ -313,7 +317,8 @@ test('#35 AC8: what Find selects never reaches the clipboard, even with Copy on 
   await expect(dialog).toHaveCount(0)
   await page.locator(TERMINAL).click()
   await printAlphas()
-  await app.evaluate(({ clipboard }) => clipboard.writeText('before'))
+  // What this app writes, never the system clipboard every test on the display shares (#60).
+  await recordClipboardWrites(app)
 
   await find('alpha')
   await expect(result()).toHaveText('1 of 3')
@@ -326,7 +331,7 @@ test('#35 AC8: what Find selects never reaches the clipboard, even with Copy on 
   await page.getByRole('button', { name: 'Next match' }).click()
   await expect(result()).toHaveText('1 of 3')
   await page.waitForTimeout(500)
-  expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe('before')
+  expect(await clipboardWrites(app)).toEqual([])
 
   // A selection the user makes with the mouse while the bar is open still is copied (D9).
   const rows = page.locator(`${TERMINAL} .xterm-screen`)
@@ -336,7 +341,8 @@ test('#35 AC8: what Find selects never reaches the clipboard, even with Copy on 
   await page.mouse.move(box.x + box.width / 2, box.y + 40, { steps: 5 })
   await page.mouse.up()
   await expect(bar()).toBeVisible()
-  await expect.poll(() => app.evaluate(({ clipboard }) => clipboard.readText())).not.toBe('before')
+  await expect.poll(() => clipboardWrites(app)).toHaveLength(1)
+  expect((await clipboardWrites(app))[0]).not.toBe('alpha')
 })
 
 test('#35 AC9: the query and toggles are remembered app-wide for the run, not after a restart', async () => {

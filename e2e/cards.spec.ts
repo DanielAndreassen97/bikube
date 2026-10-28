@@ -301,7 +301,9 @@ test('#31 AC1: the open card has no bar; its terminal starts at the top of the m
   for (const id of ['card-back', 'pane-split-right', 'pane-split-down', 'card-close']) {
     await expect(page.getByTestId(id)).toHaveCount(0)
   }
-  await expect(view.getByRole('button')).toHaveCount(0)
+  // The only button is the main pane's Close card ×, over the terminal, not a bar (#11 D5).
+  await expect(view.getByRole('button')).toHaveCount(1)
+  await expect(view.getByRole('button')).toHaveAccessibleName('Close card')
   await expect(view.getByRole('heading')).toHaveCount(0)
   await expect(view.getByTestId('card-status')).toHaveCount(0)
   const main = await page.locator('main').boundingBox()
@@ -512,8 +514,8 @@ test('AC8: each card keeps the directory it was created in', async () => {
   await back()
 
   const row = page.locator('.workspace-row').first()
-  await row.hover()
-  await row.getByTestId('workspace-edit').click()
+  await row.getByTestId('workspace-item').click()
+  await row.page().getByTestId('workspace-edit').click()
   await page.getByTestId('workspace-directory').fill(otherDir)
   await page.getByTestId('workspace-submit').click()
   await expect(page.getByTestId('workspace-dialog')).toHaveCount(0)
@@ -722,8 +724,8 @@ test('AC12: deleting a workspace names its running terminals and stops them', as
   await stoppedToBoard('old')
 
   const row = page.locator('.workspace-row').first()
-  await row.hover()
-  await row.getByTestId('workspace-delete').click()
+  await row.getByTestId('workspace-item').click()
+  await row.page().getByTestId('workspace-delete').click()
   const dialog = page.getByTestId('confirm-dialog')
   await expect(dialog).toContainText('2 terminals are still running and will be stopped.')
   await page.getByTestId('confirm-cancel').click()
@@ -733,8 +735,8 @@ test('AC12: deleting a workspace names its running terminals and stops them', as
   expect(alive(one)).toBe(true)
   expect(alive(two)).toBe(true)
 
-  await row.hover()
-  await row.getByTestId('workspace-delete').click()
+  await row.getByTestId('workspace-item').click()
+  await row.page().getByTestId('workspace-delete').click()
   await page.getByTestId('confirm-delete').click()
   await expect(page.getByTestId('workspace-item')).toHaveCount(0)
   await expect(page.getByTestId('empty-state')).toBeVisible()
@@ -749,8 +751,8 @@ test('D15: without running cards the workspace delete dialog is unchanged', asyn
   await run('exit 0')
   await stoppedToBoard('old')
   const row = page.locator('.workspace-row').first()
-  await row.hover()
-  await row.getByTestId('workspace-delete').click()
+  await row.getByTestId('workspace-item').click()
+  await row.page().getByTestId('workspace-delete').click()
   await expect(page.getByTestId('confirm-dialog').locator('.modal-message')).toHaveText(
     'Delete "alpha"? This removes its board.'
   )
@@ -759,19 +761,16 @@ test('D15: without running cards the workspace delete dialog is unchanged', asyn
 test('D8/D15: the back shortcut does nothing while a dialog is over the card view', async () => {
   await createWorkspace(makeDir('alpha'), 'alpha')
   await newCard('Backlog', 'api')
-  const row = page.locator('.workspace-row').first()
-  await row.hover()
-  await row.getByTestId('workspace-delete').click()
-  await expect(page.getByTestId('confirm-dialog')).toContainText(
-    '1 terminal is still running and will be stopped.'
-  )
+  // The running card's Close confirmation, over its view.
+  await page.keyboard.press(SHORTCUTS.closeCard)
+  await expect(page.getByTestId('confirm-dialog')).toBeVisible()
   await page.keyboard.press('Control+Shift+B')
   await expect(page.getByTestId('confirm-dialog')).toBeVisible()
   await expect(page.getByTestId('card-view')).toBeVisible()
-  // Confirming removes the open card's workspace, so the view closes.
-  await page.getByTestId('confirm-delete').click()
-  await expect(page.getByTestId('card-view')).toHaveCount(0)
-  await expect(page.getByTestId('empty-state')).toBeVisible()
+  // Cancelling keeps the card open and running.
+  await page.getByTestId('confirm-cancel').click()
+  await expect(page.getByTestId('confirm-dialog')).toHaveCount(0)
+  await expectCardOpen(page, 'api')
 })
 
 test('#31 AC17: a new workspace shows its empty board; deleting it brings back the open card', async () => {
@@ -783,8 +782,8 @@ test('#31 AC17: a new workspace shows its empty board; deleting it brings back t
   await expect(page.getByTestId('card-view')).toHaveCount(0)
   await expect(page.getByTestId('card')).toHaveCount(0)
   const row = page.locator('.workspace-row').filter({ hasText: 'delta' })
-  await row.hover()
-  await row.getByTestId('workspace-delete').click()
+  await row.getByTestId('workspace-item').click()
+  await row.page().getByTestId('workspace-delete').click()
   await page.getByTestId('confirm-delete').click()
   await expectCardOpen(page, 'api')
   await expectStatusOnBoard(page, 'api', 'Running')
@@ -826,8 +825,8 @@ test('D15: the workspace delete dialog follows terminals that exit while it is o
   await back()
 
   const row = page.locator('.workspace-row').first()
-  await row.hover()
-  await row.getByTestId('workspace-delete').click()
+  await row.getByTestId('workspace-item').click()
+  await row.page().getByTestId('workspace-delete').click()
   const message = page.getByTestId('confirm-dialog').locator('.modal-message')
   await expect(message).toContainText('2 terminals are still running and will be stopped.')
   process.kill(one, 'SIGKILL')
@@ -869,8 +868,8 @@ test("#5 AC11: a Stopped card isn't counted as running and is deleted without as
   await back()
 
   const row = page.locator('.workspace-row').first()
-  await row.hover()
-  await row.getByTestId('workspace-delete').click()
+  await row.getByTestId('workspace-item').click()
+  await row.page().getByTestId('workspace-delete').click()
   await expect(page.getByTestId('confirm-dialog').locator('.modal-message')).toHaveText(
     'Delete "alpha"? This removes its board. 1 terminal is still running and will be stopped.'
   )
@@ -881,8 +880,8 @@ test("#5 AC11: a Stopped card isn't counted as running and is deleted without as
   await expect(card('agent')).toHaveCount(0)
   await expect(card('sh')).toHaveCount(1)
 
-  await row.hover()
-  await row.getByTestId('workspace-delete').click()
+  await row.getByTestId('workspace-item').click()
+  await row.page().getByTestId('workspace-delete').click()
   await expect(page.getByTestId('confirm-dialog')).toContainText(
     '1 terminal is still running and will be stopped.'
   )
