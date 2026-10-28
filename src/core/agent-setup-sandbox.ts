@@ -1,11 +1,12 @@
 /**
  * The Agent setup page's Sandbox section (#72): each settings file's `sandbox` object (D2), its
  * single values by precedence as facts (D3, D4) and its string lists merged across files (D3, D5),
- * the lists' entries filtered by the search (D6). Plain TS with no Node or DOM imports: the
+ * the lists' entries filtered by the search (D6) and the source filter (#71 D2: by the file each
+ * entry is set in, as Permissions' rules; the facts never, as Permissions' Default mode). Plain TS with no Node or DOM imports: the
  * renderer runs it.
  */
 
-import { matchesQuery } from './agent-setup-rows'
+import { ALL_SOURCES, matchesQuery, matchesSource, type SourceFilter } from './agent-setup-rows'
 import { sourceLabel, type AgentSetupSnapshot, type EntrySource } from './agent-setup-snapshot'
 
 /** One fact (D4): a single value under `sandbox`, from the first file by precedence that sets it. */
@@ -71,8 +72,12 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 const isSingle = (value: unknown): value is boolean | number | string =>
   typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string'
 
-/** The Sandbox section's facts and lists from the three settings files (D2–D6). */
-export function sandboxView(snapshot: AgentSetupSnapshot, query: string): SandboxView {
+/** The Sandbox section's facts and lists from the three settings files (D2–D6, #71 D2). */
+export function sandboxView(
+  snapshot: AgentSetupSnapshot,
+  query: string,
+  filter: SourceFilter = ALL_SOURCES
+): SandboxView {
   const facts = new Map<string, SandboxFact>(
     KNOWN_FACTS.map(([key, label]) => [
       key,
@@ -89,6 +94,7 @@ export function sandboxView(snapshot: AgentSetupSnapshot, query: string): Sandbo
     if (!isObject(sandbox)) continue
     set = true
     const source: EntrySource = { kind: file.scope }
+    const shown = matchesSource(filter, source)
     const walk = (object: Record<string, unknown>, prefix: string): void => {
       for (const [name, value] of Object.entries(object)) {
         const key = prefix ? `${prefix}.${name}` : name
@@ -113,6 +119,7 @@ export function sandboxView(snapshot: AgentSetupSnapshot, query: string): Sandbo
             lists.set(key, list)
           }
           for (const entry of strings) {
+            if (!shown) continue
             if (!matchesQuery(query, [entry, list.label, sourceLabel(source)])) continue
             list.entries.push({ key, entry, source, file: file.file })
           }

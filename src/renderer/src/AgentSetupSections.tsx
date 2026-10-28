@@ -1,13 +1,14 @@
 import { ChevronRight, FolderOpen, RotateCcw, SquarePen, X } from 'lucide-react'
-import { createContext, useContext, useId, useMemo, useRef, useState } from 'react'
+import { createContext, Fragment, useContext, useId, useMemo, useRef, useState } from 'react'
 import type { AgentSetupSectionId } from '../../core/agent-setup-sections'
-import { AGENT_SETUP_SECTIONS } from '../../core/agent-setup-sections'
+import { AGENT_SETUP_SECTIONS, collapsedGroupKey } from '../../core/agent-setup-sections'
 import {
   accountText,
   configRows,
   effectiveSetting,
   fileLabel,
   filterDefinitions,
+  filterLabel,
   filterMemory,
   filterPlugins,
   hookGroups,
@@ -15,16 +16,18 @@ import {
   marketplaceRows,
   mcpServerRows,
   mcpStateLabel,
+  noMatchText,
   parseConfigNumber,
   permissionsView,
   pluginProvides,
-  pluginQuery,
   pluginSource,
   preferenceRows,
   sectionSummaries,
   settingsFileStates,
   setupWarnings,
-  sourceSplit
+  OVERVIEW_SECTIONS,
+  sourceSplitParts,
+  type SourceFilter
 } from '../../core/agent-setup-rows'
 import {
   sourceLabel,
@@ -64,12 +67,69 @@ export interface SectionViewProps {
   snapshot: AgentSetupSnapshot
   /** The search box's text; a section shows only its rows matching it. */
   query: string
+  /** The page's source filter (#71 D1): a section shows only its rows from it. */
+  filter: SourceFilter
   /** Shows another section, as a click on it in the list (Overview's cards, D12). */
   onShowSection: (id: AgentSetupSectionId) => void
-  /** Puts `query` in the search box (a plugin's provides-counts, D15). */
-  onSearch: (query: string) => void
+  /** Sets the page's source filter (Overview's split parts, a plugin's provides-counts; #71 D7, D8). */
+  onFilter: (filter: SourceFilter) => void
   /** The memory rows expanded (D17), kept across reads. */
   expanded: ReadonlySet<string>
+  /** The groups collapsed under their headings (#71 D9), `collapsedGroupKey`'s keys. */
+  collapsed: ReadonlySet<string>
+  /** Collapses section `section`'s group `name`, or opens it again (#71 D9). */
+  onToggleGroup: (section: AgentSetupSectionId, name: string) => void
+}
+
+/**
+ * A group of a section's rows under a heading button (#71 D9): a chevron, the group's name and
+ * the count of its rows shown; a click or Enter collapses the rows, kept in the page memory.
+ */
+export function CollapsibleGroup({
+  section,
+  name,
+  count,
+  collapsed,
+  onToggleGroup,
+  testId,
+  children
+}: {
+  section: AgentSetupSectionId
+  name: string
+  /** The rows shown, search and filter applied. */
+  count: number
+  collapsed: ReadonlySet<string>
+  onToggleGroup: (section: AgentSetupSectionId, name: string) => void
+  testId?: string
+  children: React.ReactNode
+}): React.JSX.Element {
+  const id = useId()
+  const open = !collapsed.has(collapsedGroupKey(section, name))
+  return (
+    <section className="agent-setup-group" data-testid={testId}>
+      <h4 className="agent-setup-subheading">
+        <button
+          type="button"
+          className="agent-setup-group-toggle"
+          data-testid="agent-setup-group-toggle"
+          aria-expanded={open}
+          aria-controls={id}
+          onClick={() => onToggleGroup(section, name)}
+        >
+          <ChevronRight {...SMALL_ICON} className="agent-setup-expand-icon" />
+          <span className="agent-setup-group-title" data-testid="agent-setup-group-name">
+            {name}
+          </span>{' '}
+          <span className="agent-setup-group-count" data-testid="agent-setup-group-count">
+            {count}
+          </span>
+        </button>
+      </h4>
+      <div id={id} hidden={!open}>
+        {children}
+      </div>
+    </section>
+  )
 }
 
 /** What a row's Open file and Reveal need (D27, D28): the folder main read and what it listed. */
@@ -214,52 +274,73 @@ function Warnings({ warnings }: { warnings: readonly string[] }): React.JSX.Elem
 const label = (id: AgentSetupSectionId): string =>
   AGENT_SETUP_SECTIONS.find((s) => s.id === id)!.label
 
-/** The sections Overview has a card for, in D12's order; those with rows so far. */
-const OVERVIEW_CARDS: readonly AgentSetupSectionId[] = [
-  'plugins',
-  'mcp',
-  'skills',
-  'agents',
-  'commands',
-  'hooks',
-  'memory',
-  'permissions',
-  'sandbox'
-]
-
-/** Overview (D12): a card per section with its count by source, then every warning. */
+/**
+ * Overview (D12): a card per section with its count by source, then every warning. A click on a
+ * card shows its section, the filter unchanged; each part of its split is its own button setting
+ * the filter to that source as well (#71 D7). The card's name and count are one button, so the
+ * split's buttons aren't nested in another.
+ */
 export function OverviewSection({
   snapshot,
   query,
-  onShowSection
+  filter,
+  onShowSection,
+  onFilter
 }: SectionViewProps): React.JSX.Element {
-  const summaries = sectionSummaries(snapshot, query)
+  const summaries = sectionSummaries(snapshot, query, filter)
+  const narrowed = query.trim() !== '' || filter.kind !== 'all'
   const warnings = setupWarnings(snapshot)
   return (
     <div className="agent-setup-overview">
       <div className="agent-setup-cards">
-        {OVERVIEW_CARDS.map((id) => {
+        {OVERVIEW_SECTIONS.map((id) => {
           const summary = summaries[id]
           if (!summary) return null
-          const split = sourceSplit(summary)
+          const parts = sourceSplitParts(summary)
           return (
-            <button
+            <div
               key={id}
-              type="button"
               className="agent-setup-card"
               data-testid={`agent-setup-overview-${id}`}
-              data-dimmed={query.trim() !== '' && summary.count === 0}
+              data-dimmed={narrowed && summary.count === 0}
               onClick={() => onShowSection(id)}
             >
-              <span className="agent-setup-card-head">
-                <SectionIcon id={id} />
-                <span className="agent-setup-card-label">{label(id)}</span>
-              </span>
-              <span className="agent-setup-card-count">{summary.count}</span>
+              <button
+                type="button"
+                className="agent-setup-card-main"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onShowSection(id)
+                }}
+              >
+                <span className="agent-setup-card-head">
+                  <SectionIcon id={id} />
+                  <span className="agent-setup-card-label">{label(id)}</span>
+                </span>
+                <span className="agent-setup-card-count">{summary.count}</span>
+              </button>
               <span className="agent-setup-card-split" data-testid="agent-setup-overview-split">
-                {split || 'None'}
+                {parts.length === 0
+                  ? 'None'
+                  : parts.map((part, i) => (
+                      <Fragment key={part.label}>
+                        {i > 0 && <span aria-hidden="true">{' · '}</span>}
+                        <button
+                          type="button"
+                          className="agent-setup-link agent-setup-link-quiet agent-setup-card-part"
+                          title={`Show ${label(id)} from ${filterLabel(snapshot, part.filter)}`}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onFilter(part.filter)
+                            onShowSection(id)
+                          }}
+                        >
+                          {part.label}
+                        </button>
+                      </Fragment>
+                    ))}
               </span>
-            </button>
+            </div>
           )
         })}
       </div>
@@ -367,11 +448,13 @@ function DefinitionRow({
 function DefinitionSection({
   kind,
   snapshot,
-  query
+  query,
+  filter
 }: SectionViewProps & { kind: DefinitionKind }): React.JSX.Element {
   const all = snapshot[kind]
-  const rows = filterDefinitions(all, query)
-  const more = query.trim() === '' ? (snapshot.more[kind] ?? 0) : 0
+  const rows = filterDefinitions(all, query, filter)
+  // Rows past the folder's limit only with no search and the filter at All (#71 D2).
+  const more = query.trim() === '' && filter.kind === 'all' ? (snapshot.more[kind] ?? 0) : 0
   if (all.length === 0 && more === 0) {
     return (
       <p className="agent-setup-empty" data-testid="agent-setup-empty">
@@ -382,7 +465,7 @@ function DefinitionSection({
   if (rows.length === 0) {
     return (
       <p className="agent-setup-empty" data-testid="agent-setup-no-match">
-        No {NOUNS[kind]} match “{query.trim()}”.
+        {noMatchText(NOUNS[kind], query, snapshot, filter)}
       </p>
     )
   }
@@ -487,9 +570,10 @@ export function MemorySection({
   workspace,
   snapshot,
   query,
+  filter,
   expanded
 }: SectionViewProps): React.JSX.Element {
-  const rows = filterMemory(snapshot.memory, query)
+  const rows = filterMemory(snapshot.memory, query, filter)
   if (snapshot.memory.length === 0) {
     return (
       <p className="agent-setup-empty" data-testid="agent-setup-empty">
@@ -501,7 +585,7 @@ export function MemorySection({
   if (rows.length === 0) {
     return (
       <p className="agent-setup-empty" data-testid="agent-setup-no-match">
-        No memory files match “{query.trim()}”.
+        {noMatchText('memory files', query, snapshot, filter)}
       </p>
     )
   }
@@ -521,8 +605,14 @@ export function MemorySection({
 }
 
 /** Hooks (D19): every hook command by event, Bikube's with its chip and no Open file. */
-export function HooksSection({ snapshot, query }: SectionViewProps): React.JSX.Element {
-  const groups = hookGroups(snapshot.hooks, query)
+export function HooksSection({
+  snapshot,
+  query,
+  filter,
+  collapsed,
+  onToggleGroup
+}: SectionViewProps): React.JSX.Element {
+  const groups = hookGroups(snapshot.hooks, query, filter)
   if (snapshot.hooks.length === 0) {
     return (
       <p className="agent-setup-empty" data-testid="agent-setup-empty">
@@ -534,19 +624,22 @@ export function HooksSection({ snapshot, query }: SectionViewProps): React.JSX.E
   if (groups.length === 0) {
     return (
       <p className="agent-setup-empty" data-testid="agent-setup-no-match">
-        No hooks match “{query.trim()}”.
+        {noMatchText('hooks', query, snapshot, filter)}
       </p>
     )
   }
   return (
     <div className="agent-setup-groups" data-testid="agent-setup-hooks">
       {groups.map((group) => (
-        <section
+        <CollapsibleGroup
           key={group.event}
-          className="agent-setup-group"
-          data-testid="agent-setup-hook-group"
+          section="hooks"
+          name={group.event}
+          count={group.hooks.length}
+          collapsed={collapsed}
+          onToggleGroup={onToggleGroup}
+          testId="agent-setup-hook-group"
         >
-          <h4 className="agent-setup-subheading">{group.event}</h4>
           <ul className="agent-setup-rows">
             {group.hooks.map((hook, i) => (
               <HookRow
@@ -556,7 +649,7 @@ export function HooksSection({ snapshot, query }: SectionViewProps): React.JSX.E
               />
             ))}
           </ul>
-        </section>
+        </CollapsibleGroup>
       ))}
     </div>
   )
@@ -614,8 +707,14 @@ const PERMISSION_LISTS = [
 ] as const
 
 /** Permissions (D20), read-only: the effective default mode, then every source's rules. */
-export function PermissionsSection({ snapshot, query }: SectionViewProps): React.JSX.Element {
-  const view = permissionsView(snapshot, query)
+export function PermissionsSection({
+  snapshot,
+  query,
+  filter,
+  collapsed,
+  onToggleGroup
+}: SectionViewProps): React.JSX.Element {
+  const view = permissionsView(snapshot, query, filter)
   return (
     <div className="agent-setup-groups" data-testid="agent-setup-permissions">
       <dl className="agent-setup-facts">
@@ -637,8 +736,14 @@ export function PermissionsSection({ snapshot, query }: SectionViewProps): React
         const testId = `agent-setup-permissions-${list === 'additionalDirectories' ? 'directories' : list}`
         const rules = view[list]
         return (
-          <section key={list} className="agent-setup-group">
-            <h4 className="agent-setup-subheading">{title}</h4>
+          <CollapsibleGroup
+            key={list}
+            section="permissions"
+            name={title}
+            count={rules.length}
+            collapsed={collapsed}
+            onToggleGroup={onToggleGroup}
+          >
             {rules.length === 0 ? (
               <p className="agent-setup-empty" data-testid={testId}>
                 None
@@ -668,7 +773,7 @@ export function PermissionsSection({ snapshot, query }: SectionViewProps): React
                 ))}
               </ul>
             )}
-          </section>
+          </CollapsibleGroup>
         )
       })}
     </div>
@@ -821,14 +926,14 @@ function PluginRow({
   plugin,
   snapshot,
   onShowSection,
-  onSearch
+  onFilter
 }: {
   /** The workspace folder, as the page's data is kept by. */
   folder: string
   plugin: PluginEntry
   snapshot: AgentSetupSnapshot
   onShowSection: SectionViewProps['onShowSection']
-  onSearch: SectionViewProps['onSearch']
+  onFilter: SectionViewProps['onFilter']
 }): React.JSX.Element {
   const { saving } = useAgentSetupData(folder)
   const asked = saving.get(switchKey({ kind: 'plugin', key: plugin.key }))
@@ -874,7 +979,8 @@ function PluginRow({
                 className="agent-setup-link agent-setup-link-quiet"
                 title={`Show ${label(item.section)} from ${plugin.name}`}
                 onClick={() => {
-                  onSearch(pluginQuery(plugin))
+                  // The section with the filter at this plugin, the search left as it is (#71 D8).
+                  onFilter({ kind: 'plugin', key: plugin.key })
                   onShowSection(item.section)
                 }}
               >
@@ -908,23 +1014,31 @@ export function PluginsSection({
   workspace,
   snapshot,
   query,
+  filter,
   onShowSection,
-  onSearch
+  onFilter,
+  collapsed,
+  onToggleGroup
 }: SectionViewProps): React.JSX.Element {
-  const plugins = filterPlugins(snapshot.plugins, query)
+  const plugins = filterPlugins(snapshot.plugins, query, filter)
   const marketplaces = marketplaceRows(snapshot, query)
   const searching = query.trim() !== ''
   return (
     <div className="agent-setup-groups" data-testid="agent-setup-plugins">
-      <section className="agent-setup-group">
-        <h4 className="agent-setup-subheading">Installed</h4>
+      <CollapsibleGroup
+        section="plugins"
+        name="Installed"
+        count={plugins.length}
+        collapsed={collapsed}
+        onToggleGroup={onToggleGroup}
+      >
         {snapshot.plugins.length === 0 ? (
           <p className="agent-setup-empty" data-testid="agent-setup-empty">
             No plugins installed. Install them in Claude Code with /plugin.
           </p>
         ) : plugins.length === 0 ? (
           <p className="agent-setup-empty" data-testid="agent-setup-no-match">
-            No plugins match “{query.trim()}”.
+            {noMatchText('plugins', query, snapshot, filter)}
           </p>
         ) : (
           <ul className="agent-setup-rows">
@@ -935,46 +1049,54 @@ export function PluginsSection({
                 plugin={plugin}
                 snapshot={snapshot}
                 onShowSection={onShowSection}
-                onSearch={onSearch}
+                onFilter={onFilter}
               />
             ))}
           </ul>
         )}
-      </section>
-      <section className="agent-setup-group">
-        <h4 className="agent-setup-subheading">Marketplaces</h4>
-        {marketplaces.length === 0 ? (
-          <p className="agent-setup-empty" data-testid="agent-setup-marketplaces-empty">
-            {searching
-              ? `No marketplaces match “${query.trim()}”.`
-              : 'No marketplaces known. Add one in Claude Code with /plugin marketplace add.'}
-          </p>
-        ) : (
-          <ul className="agent-setup-rows" data-testid="agent-setup-marketplaces">
-            {marketplaces.map((market) => (
-              <li
-                key={market.name}
-                className="agent-setup-row"
-                data-testid="agent-setup-marketplace"
-              >
-                <div className="agent-setup-row-main">
-                  <span className="agent-setup-row-name" data-testid="agent-setup-row-name">
-                    {market.name}
-                  </span>
-                  <span className="agent-setup-row-file" title={market.source}>
-                    {market.source}
-                  </span>
-                  {market.lastUpdated && (
-                    <span className="agent-setup-row-meta agent-setup-row-end">
-                      Updated {updatedText(market.lastUpdated)}
+      </CollapsibleGroup>
+      {/* Marketplaces have no source: shown only with the filter at All (#71 D2). */}
+      {filter.kind === 'all' && (
+        <CollapsibleGroup
+          section="plugins"
+          name="Marketplaces"
+          count={marketplaces.length}
+          collapsed={collapsed}
+          onToggleGroup={onToggleGroup}
+        >
+          {marketplaces.length === 0 ? (
+            <p className="agent-setup-empty" data-testid="agent-setup-marketplaces-empty">
+              {searching
+                ? `No marketplaces match “${query.trim()}”.`
+                : 'No marketplaces known. Add one in Claude Code with /plugin marketplace add.'}
+            </p>
+          ) : (
+            <ul className="agent-setup-rows" data-testid="agent-setup-marketplaces">
+              {marketplaces.map((market) => (
+                <li
+                  key={market.name}
+                  className="agent-setup-row"
+                  data-testid="agent-setup-marketplace"
+                >
+                  <div className="agent-setup-row-main">
+                    <span className="agent-setup-row-name" data-testid="agent-setup-row-name">
+                      {market.name}
                     </span>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+                    <span className="agent-setup-row-file" title={market.source}>
+                      {market.source}
+                    </span>
+                    {market.lastUpdated && (
+                      <span className="agent-setup-row-meta agent-setup-row-end">
+                        Updated {updatedText(market.lastUpdated)}
+                      </span>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CollapsibleGroup>
+      )}
     </div>
   )
 }
@@ -1065,10 +1187,11 @@ function McpServerItem({
 export function McpServersSection({
   workspace,
   snapshot,
-  query
+  query,
+  filter
 }: SectionViewProps): React.JSX.Element {
   const all = mcpServerRows(snapshot, '')
-  const rows = mcpServerRows(snapshot, query)
+  const rows = mcpServerRows(snapshot, query, filter)
   if (all.length === 0) {
     return (
       <p className="agent-setup-empty" data-testid="agent-setup-empty">
@@ -1079,7 +1202,7 @@ export function McpServersSection({
   if (rows.length === 0) {
     return (
       <p className="agent-setup-empty" data-testid="agent-setup-no-match">
-        No MCP servers match “{query.trim()}”.
+        {noMatchText('MCP servers', query, snapshot, filter)}
       </p>
     )
   }
@@ -1283,16 +1406,28 @@ function ConfigItem({
  * value and where it comes from, booleans and numbers changed in place in settings.local.json;
  * then `~/.claude.json`'s Preferences, read-only.
  */
-export function ConfigSection({ workspace, snapshot, query }: SectionViewProps): React.JSX.Element {
+export function ConfigSection({
+  workspace,
+  snapshot,
+  query,
+  filter,
+  collapsed,
+  onToggleGroup
+}: SectionViewProps): React.JSX.Element {
   const all = configRows(snapshot, '')
-  const rows = configRows(snapshot, query)
+  const rows = configRows(snapshot, query, filter)
   const allPreferences = preferenceRows(snapshot, '')
-  const preferences = preferenceRows(snapshot, query)
-  const searching = query.trim() !== ''
+  const preferences = preferenceRows(snapshot, query, filter)
+  const narrowed = query.trim() !== '' || filter.kind !== 'all'
   return (
     <div className="agent-setup-groups" data-testid="agent-setup-config">
-      <section className="agent-setup-group">
-        <h4 className="agent-setup-subheading">Settings</h4>
+      <CollapsibleGroup
+        section="config"
+        name="Settings"
+        count={rows.length}
+        collapsed={collapsed}
+        onToggleGroup={onToggleGroup}
+      >
         {all.length === 0 ? (
           <p className="agent-setup-empty" data-testid="agent-setup-empty">
             No settings set. Claude Code reads them from .claude/settings.json and
@@ -1300,7 +1435,7 @@ export function ConfigSection({ workspace, snapshot, query }: SectionViewProps):
           </p>
         ) : rows.length === 0 ? (
           <p className="agent-setup-empty" data-testid="agent-setup-no-match">
-            No settings match “{query.trim()}”.
+            {noMatchText('settings', query, snapshot, filter)}
           </p>
         ) : (
           <ul className="agent-setup-rows">
@@ -1314,13 +1449,18 @@ export function ConfigSection({ workspace, snapshot, query }: SectionViewProps):
             ))}
           </ul>
         )}
-      </section>
-      <section className="agent-setup-group">
-        <h4 className="agent-setup-subheading">Preferences</h4>
+      </CollapsibleGroup>
+      <CollapsibleGroup
+        section="config"
+        name="Preferences"
+        count={preferences.length}
+        collapsed={collapsed}
+        onToggleGroup={onToggleGroup}
+      >
         {preferences.length === 0 ? (
           <p className="agent-setup-empty" data-testid="agent-setup-preferences-empty">
-            {searching && allPreferences.length > 0
-              ? `No preferences match “${query.trim()}”.`
+            {narrowed && allPreferences.length > 0
+              ? noMatchText('preferences', query, snapshot, filter)
               : 'No preferences in ~/.claude.json. Claude Code saves them there from /config.'}
           </p>
         ) : (
@@ -1348,7 +1488,7 @@ export function ConfigSection({ workspace, snapshot, query }: SectionViewProps):
             ))}
           </ul>
         )}
-      </section>
+      </CollapsibleGroup>
     </div>
   )
 }

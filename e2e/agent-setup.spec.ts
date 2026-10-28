@@ -27,7 +27,8 @@ import { plainCards } from './plain-cards'
 // the login shell (a fake `claude` on a fake login PATH); (#68 S4) Plugins and MCP servers with
 // their switches, written to the workspace's `.claude/settings.local.json` and read from the test;
 // (#68 S5) Config with its switch, number field and Reset, written there too; (#68 S7) Stats from
-// transcripts in the fake home, a worktree card's folder among them, and the page in each theme.
+// transcripts in the fake home, a worktree card's folder among them, and the page in each theme;
+// (#71 S1) the source filter's chip row, page-wide, with the search and per workspace.
 
 const darwin = process.platform === 'darwin'
 /** The command palette's default shortcut (#40 D1) as a Playwright press. */
@@ -581,7 +582,7 @@ test("AC7: Hooks lists Bikube's hooks and a project hook whose file is missing, 
 
   await tab('Hooks').click()
   const groups = panel().getByTestId('agent-setup-hook-group')
-  await expect(groups.getByRole('heading')).toHaveText([
+  await expect(groups.getByTestId('agent-setup-group-name')).toHaveText([
     'PreToolUse',
     'Notification',
     'UserPromptSubmit',
@@ -753,17 +754,18 @@ test("AC5: a plugin's switch writes settings.local.json only, and its entries re
     'Changes apply to Claude Code sessions started from now on'
   )
 
-  // The provides-count shows Skills filtered by the plugin; its entries read Plugin off.
+  // The provides-count shows Skills with the filter at the plugin (#71 D8); its entries read
+  // Plugin off.
   await plugin.getByRole('button', { name: '1 skill' }).click()
   await expect(tab('Skills')).toHaveAttribute('aria-selected', 'true')
-  await expect(page.getByTestId('agent-setup-search')).toHaveValue('Plugin kit')
+  await expect(page.getByTestId('agent-setup-filter-plugin')).toHaveText('Plugin kit 1')
+  await expect(page.getByTestId('agent-setup-search')).toHaveValue('')
   await expect(rowNames()).toHaveText(['kit:lint'])
   await expect(row('kit:lint')).toHaveAttribute('data-plugin-off', 'true')
   await expect(row('kit:lint').getByTestId('agent-setup-plugin-off')).toHaveText('Plugin off')
   await tab('Agents').click()
   await expect(row('kit:fixer')).toHaveAttribute('data-plugin-off', 'true')
 
-  await page.getByTestId('agent-setup-search').press('Escape')
   await tab('Plugins').click()
   await pluginSwitch().click()
   await expect(pluginSwitch()).toBeChecked()
@@ -1265,6 +1267,41 @@ test('#72 AC6: with no sandbox in any settings file, Enabled reads Off and every
   )
 })
 
+test("#71 D9, #72: Sandbox's list headings show their counts and collapse, kept across sections", async () => {
+  await openWith(sandboxFixtures)
+  await tab('Sandbox').click()
+  const allowed = groupToggle('Allowed domains')
+  await expect(allowed).toHaveText('Allowed domains 3')
+  await expect(groupToggle('Denied domains')).toHaveText('Denied domains 0')
+  await expect(allowed).toHaveAttribute('aria-expanded', 'true')
+  await expect(groupToggle('Deny read')).toHaveAttribute('aria-expanded', 'true')
+  const rows = await groupBody('Allowed domains')
+  await expect(rows.getByTestId('agent-setup-sandbox-entry')).toHaveCount(3)
+
+  await allowed.click()
+  await expect(allowed).toHaveAttribute('aria-expanded', 'false')
+  await expect(rows).toBeHidden()
+  // The facts and the other lists stay.
+  await expect(sandboxFact('enabled')).toBeVisible()
+  await expect(await groupBody('Deny read')).toBeVisible()
+
+  // The count follows the search and the filter.
+  await page.getByTestId('agent-setup-search').fill('github')
+  await expect(allowed).toHaveText('Allowed domains 2')
+  await page.getByTestId('agent-setup-search').fill('')
+  await chip('project').click()
+  await expect(allowed).toHaveText('Allowed domains 1')
+  await chip('all').click()
+
+  // Kept after a switch to Config and back.
+  await tab('Config').click()
+  await expect(panel()).toHaveAttribute('data-section', 'config')
+  await tab('Sandbox').click()
+  await expect(allowed).toHaveAttribute('aria-expanded', 'false')
+  await expect(await groupBody('Allowed domains')).toBeHidden()
+  await expect(groupToggle('Deny read')).toHaveAttribute('aria-expanded', 'true')
+})
+
 // #68 S7: Stats from transcripts written into the fake home's `.claude/projects`.
 
 /** A Claude Code project folder's name (D14): every character outside A-Z a-z 0-9 a dash. */
@@ -1484,4 +1521,493 @@ test("AC18: in Dark, Light and Nord the page and its Stats use the theme's colou
       await page.evaluate(() => window.innerWidth)
     )
   }
+})
+
+// The source filter (#71 S1): a chip row at the top of each filterable section, page-wide.
+
+/**
+ * #71's fixtures in `folder` and the fake home: 2 Project, 3 User and 1 kit skill (kit a User
+ * install, `tools` a Project one with nothing), only User agents, a Project command, only
+ * `~/.claude/CLAUDE.md`, User hooks under PreToolUse and SessionStart beside Bikube's, Config keys
+ * from Local and User, a Preference and a marketplace.
+ */
+function filterFixtures(folder: string): void {
+  write(join(folder, '.claude/skills/review/SKILL.md'), frontmatter('review', 'Reviews the diff'))
+  write(join(folder, '.claude/skills/publish/SKILL.md'), frontmatter('publish', 'Publishes docs'))
+  write(join(home, '.claude/skills/notes/SKILL.md'), frontmatter('notes', 'Takes notes'))
+  write(join(home, '.claude/skills/blog/SKILL.md'), frontmatter('blog', 'Writes posts'))
+  write(join(home, '.claude/skills/draft/SKILL.md'), frontmatter('draft', 'Drafts text'))
+  write(join(home, '.claude/agents/helper.md'), frontmatter('helper', 'Helps out'))
+  write(join(folder, '.claude/commands/deploy.md'), frontmatter('deploy', 'Ships it'))
+  write(join(home, '.claude/CLAUDE.md'), '# Me\n')
+  const kitPath = join(home, '.claude/plugins/cache/market/kit/1.0.0')
+  const toolsPath = join(home, '.claude/plugins/cache/market/tools/1.0.0')
+  write(
+    join(home, '.claude/plugins/installed_plugins.json'),
+    JSON.stringify({
+      version: 2,
+      plugins: {
+        'kit@market': [{ scope: 'user', installPath: kitPath, version: '1.0.0' }],
+        'tools@market': [
+          { scope: 'project', projectPath: folder, installPath: toolsPath, version: '1.0.0' }
+        ]
+      }
+    })
+  )
+  write(join(kitPath, '.claude-plugin/plugin.json'), JSON.stringify({ name: 'kit' }))
+  write(join(kitPath, 'skills/lint/SKILL.md'), frontmatter('lint', 'Lints the code'))
+  write(join(toolsPath, '.claude-plugin/plugin.json'), JSON.stringify({ name: 'tools' }))
+  write(
+    join(home, '.claude/plugins/known_marketplaces.json'),
+    JSON.stringify({ market: { source: { source: 'github', repo: 'me/market' } } })
+  )
+  write(
+    join(home, '.claude/settings.json'),
+    JSON.stringify({
+      enabledPlugins: { 'kit@market': true },
+      cleanupPeriodDays: 30,
+      hooks: {
+        PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: '/bin/echo pre' }] }],
+        SessionStart: [{ hooks: [{ type: 'command', command: '/bin/echo start' }] }]
+      }
+    })
+  )
+  write(join(folder, '.claude/settings.local.json'), JSON.stringify({ verbose: true }))
+  write(join(home, '.claude.json'), JSON.stringify({ autoUpdates: true }))
+}
+
+const chipRow = (): Locator => panel().getByTestId('agent-setup-filter')
+/** The chip row's chips, each reading `<label> <count>`. */
+const chips = (): Locator => chipRow().getByRole('button')
+const chip = (kind: string): Locator => page.getByTestId(`agent-setup-filter-${kind}`)
+const pluginChip = (): Locator => chip('plugin')
+const pluginItems = (): Locator => page.getByTestId('agent-setup-filter-plugin-item')
+const dimmed = (id: string): Locator => page.getByTestId(`agent-setup-section-${id}`)
+
+test('#71 AC1, AC2: Skills shows its sources as chips; User shows only its rows, again All', async () => {
+  await openWith(filterFixtures)
+  await tab('Skills').click()
+  await expect(chipRow()).toHaveAttribute('role', 'group')
+  await expect(chipRow()).toHaveAccessibleName('Filter by source')
+  await expect(chips()).toHaveText(['All 6', 'Project 2', 'User 3', 'Plugin 1'])
+  await expect(chip('all')).toHaveAttribute('aria-pressed', 'true')
+  await expect(chip('user')).toHaveAttribute('aria-pressed', 'false')
+  await expect(rowNames()).toHaveCount(6)
+
+  await chip('user').click()
+  await expect(rowNames()).toHaveText(['blog', 'draft', 'notes'])
+  await expect(chip('user')).toHaveAttribute('aria-pressed', 'true')
+  await expect(chip('all')).toHaveAttribute('aria-pressed', 'false')
+  await expect(count('skills')).toHaveText('3')
+
+  // The active chip again: All.
+  await chip('user').click()
+  await expect(rowNames()).toHaveCount(6)
+  await expect(chip('all')).toHaveAttribute('aria-pressed', 'true')
+  await expect(count('skills')).toHaveText('6')
+
+  // Agents' rows all come from the user: no chip row at All.
+  await tab('Agents').click()
+  await expect(rowNames()).toHaveText(['helper'])
+  await expect(chipRow()).toHaveCount(0)
+})
+
+test('#71 AC3: the filter is page-wide: Hooks follows it, Status is all there, sections dim', async () => {
+  await openWith(filterFixtures)
+  await tab('Skills').click()
+  await chip('user').click()
+
+  await tab('Hooks').click()
+  await expect(chip('user')).toHaveAttribute('aria-pressed', 'true')
+  const sources = panel().getByTestId('agent-setup-row').getByTestId('agent-setup-source')
+  await expect(sources).toHaveText(['User', 'User'])
+  await expect(panel().getByTestId('agent-setup-hook-command')).toHaveText([
+    '/bin/echo pre',
+    '/bin/echo start'
+  ])
+  await expect(count('hooks')).toHaveText('2')
+
+  // Status is never filtered.
+  await tab('Status').click()
+  await expect(panel().getByTestId('agent-setup-status-file')).toHaveCount(6)
+  await expect(panel().getByTestId('agent-setup-filter')).toHaveCount(0)
+
+  // Sections with no User row are dimmed: Commands has only a Project one.
+  await expect(dimmed('commands')).toHaveAttribute('data-dimmed', 'true')
+  await expect(dimmed('mcp')).toHaveAttribute('data-dimmed', 'true')
+  await expect(dimmed('skills')).toHaveAttribute('data-dimmed', 'false')
+  await expect(dimmed('memory')).toHaveAttribute('data-dimmed', 'false')
+  await expect(dimmed('status')).toHaveAttribute('data-dimmed', 'false')
+  await expect(count('commands')).toHaveText('0')
+  // Config: the User key and the preference, not the Local key.
+  await expect(count('config')).toHaveText('2')
+})
+
+test('#71 AC4: the filter and the search together; Esc clears only the search', async () => {
+  await openWith(filterFixtures)
+  await tab('Skills').click()
+  await chip('user').click()
+  const search = page.getByTestId('agent-setup-search')
+  await search.fill('bl')
+  await expect(rowNames()).toHaveText(['blog'])
+  // Each chip counts its rows matching the search; the chips stay.
+  await expect(chips()).toHaveText(['All 2', 'Project 1', 'User 1', 'Plugin 0'])
+  await expect(count('skills')).toHaveText('1')
+
+  await search.fill('blz')
+  await expect(panel().getByTestId('agent-setup-no-match')).toHaveText(
+    'No skills from User match “blz”.'
+  )
+  await search.press('Escape')
+  await expect(search).toHaveValue('')
+  await expect(chip('user')).toHaveAttribute('aria-pressed', 'true')
+  await expect(rowNames()).toHaveText(['blog', 'draft', 'notes'])
+})
+
+test('#71 AC5: an active filter with no rows in a section keeps its chip and says so', async () => {
+  await openWith(filterFixtures)
+  await tab('Skills').click()
+  await chip('project').click()
+  await tab('Memory').click()
+  await expect(chips()).toHaveText(['All 1', 'Project 0', 'User 1'])
+  await expect(chip('project')).toHaveAttribute('aria-pressed', 'true')
+  await expect(panel().getByTestId('agent-setup-no-match')).toHaveText(
+    'No memory files from Project.'
+  )
+  await chip('all').click()
+  await expect(panel().getByTestId('agent-setup-memory-row')).toHaveCount(1)
+  // One source and the filter at All: no chip row.
+  await expect(chipRow()).toHaveCount(0)
+})
+
+test("#71 AC6, AC7: the Plugin chip's menu picks a plugin; Plugins then shows only it", async () => {
+  await openWith(filterFixtures)
+  await tab('Skills').click()
+  await pluginChip().click()
+  await expect(pluginChip()).toHaveAttribute('aria-expanded', 'true')
+  await expect(pluginItems()).toHaveText(['All plugins 1', 'kit 1'])
+  await expect(pluginItems().first()).toBeFocused()
+  await page.keyboard.press('ArrowDown')
+  await page.keyboard.press('Enter')
+  await expect(pluginItems()).toHaveCount(0)
+  await expect(pluginChip()).toHaveText('Plugin kit 1')
+  await expect(pluginChip()).toHaveAttribute('aria-pressed', 'true')
+  await expect(rowNames()).toHaveText(['kit:lint'])
+
+  // Esc on the open menu closes it, focus back on the chip.
+  await pluginChip().click()
+  await expect(pluginItems()).toHaveCount(2)
+  await expect(pluginItems().nth(1)).toHaveAttribute('aria-checked', 'true')
+  await page.keyboard.press('Escape')
+  await expect(pluginItems()).toHaveCount(0)
+  await expect(pluginChip()).toBeFocused()
+
+  // Plugins: kit's row only, no Marketplaces.
+  await tab('Plugins').click()
+  await expect(panel().getByTestId('agent-setup-plugin')).toHaveCount(1)
+  await expect(panel().getByTestId('agent-setup-plugin')).toHaveAttribute('data-key', 'kit@market')
+  await expect(panel().getByRole('heading', { name: 'Marketplaces' })).toHaveCount(0)
+  await expect(pluginChip()).toHaveText('Plugin kit 1')
+
+  await chip('all').click()
+  await expect(panel().getByTestId('agent-setup-plugin')).toHaveCount(2)
+  await expect(panel().getByRole('heading', { name: 'Marketplaces' })).toBeVisible()
+  await expect(panel().getByTestId('agent-setup-marketplace')).toHaveCount(1)
+})
+
+test("#71 AC8: a plugin's provides-count shows its section filtered by the plugin, the search unchanged", async () => {
+  await openWith(filterFixtures)
+  await tab('Plugins').click()
+  const kit = panel().getByTestId('agent-setup-plugin').filter({ hasText: 'kit' })
+  await kit.getByRole('button', { name: '1 skill' }).click()
+  await expect(tab('Skills')).toHaveAttribute('aria-selected', 'true')
+  await expect(pluginChip()).toHaveText('Plugin kit 1')
+  await expect(pluginChip()).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByTestId('agent-setup-search')).toHaveValue('')
+  await expect(rowNames()).toHaveText(['kit:lint'])
+})
+
+test("#71 AC9: Overview's split parts set the filter; its cards follow it; the card shows its section", async () => {
+  await openWith(filterFixtures)
+  const skills = page.getByTestId('agent-setup-overview-skills')
+  const split = skills.getByTestId('agent-setup-overview-split')
+  await expect(split).toHaveText('2 Project · 3 User · 1 Plugin')
+  // Overview's chips are the sources across its cards' sections (#71 D3).
+  await expect(chips()).toHaveText([
+    /^All \d+$/,
+    'Project 4',
+    /^User \d+$/,
+    /^Bikube \d+$/,
+    'Plugin 3'
+  ])
+
+  await split.getByRole('button', { name: '3 User' }).click()
+  await expect(tab('Skills')).toHaveAttribute('aria-selected', 'true')
+  await expect(chip('user')).toHaveAttribute('aria-pressed', 'true')
+  await expect(rowNames()).toHaveText(['blog', 'draft', 'notes'])
+
+  await tab('Overview').click()
+  await expect(chip('user')).toHaveAttribute('aria-pressed', 'true')
+  await expect(skills.locator('.agent-setup-card-count')).toHaveText('3')
+  await expect(split).toHaveText('3 User')
+  await expect(page.getByTestId('agent-setup-overview-commands')).toHaveAttribute(
+    'data-dimmed',
+    'true'
+  )
+  await expect(skills).toHaveAttribute('data-dimmed', 'false')
+
+  // The card's name shows Skills, the filter unchanged.
+  await skills.getByRole('button', { name: /Skills/ }).click()
+  await expect(tab('Skills')).toHaveAttribute('aria-selected', 'true')
+  await expect(chip('user')).toHaveAttribute('aria-pressed', 'true')
+
+  // Plugin sets All plugins.
+  await chip('all').click()
+  await tab('Overview').click()
+  await split.getByRole('button', { name: '1 Plugin' }).click()
+  await expect(tab('Skills')).toHaveAttribute('aria-selected', 'true')
+  await expect(pluginChip()).toHaveText('Plugin 1')
+  await expect(pluginChip()).toHaveAttribute('aria-pressed', 'true')
+  await expect(rowNames()).toHaveText(['kit:lint'])
+})
+
+test("#71 AC12: each workspace's page keeps its own filter for the run, none after a restart", async () => {
+  await launch()
+  const a = await createWorkspace('A')
+  filterFixtures(a)
+  await setupButton().click()
+  await tab('Skills').click()
+  await chip('user').click()
+  await expect(chip('user')).toHaveAttribute('aria-pressed', 'true')
+
+  const b = await createWorkspace('B')
+  filterFixtures(b)
+  await setupButton().click()
+  await tab('Skills').click()
+  await expect(chip('all')).toHaveAttribute('aria-pressed', 'true')
+  await expect(rowNames()).toHaveCount(6)
+
+  await setupRow('A').click()
+  await expect(tab('Skills')).toHaveAttribute('aria-selected', 'true')
+  await expect(chip('user')).toHaveAttribute('aria-pressed', 'true')
+  await expect(rowNames()).toHaveCount(3)
+
+  await app!.close()
+  await launch()
+  await workspaceItem('A').click()
+  await setupButton().click()
+  await tab('Skills').click()
+  await expect(chip('all')).toHaveAttribute('aria-pressed', 'true')
+  await expect(rowNames()).toHaveCount(6)
+})
+
+/** `filterFixtures` and a Project permission rule, so every group under a heading has a row. */
+function groupFixtures(folder: string): void {
+  filterFixtures(folder)
+  write(
+    join(folder, '.claude/settings.json'),
+    JSON.stringify({ permissions: { allow: ['Bash(npm test)'] } })
+  )
+}
+
+/** The shown section's group heading button for group `name`, reading `<name> <count>`. */
+const groupToggle = (name: string): Locator =>
+  panel()
+    .getByTestId('agent-setup-group-toggle')
+    .filter({ has: page.getByTestId('agent-setup-group-name').getByText(name, { exact: true }) })
+/** The rows' container a group's heading button controls. */
+const groupBody = async (name: string): Promise<Locator> =>
+  page.locator(`[id="${await groupToggle(name).getAttribute('aria-controls')}"]`)
+
+test("#71 AC10: a group's heading shows its count and collapses it, kept across reads, sections and reopening", async () => {
+  await openWith(groupFixtures)
+  await tab('Hooks').click()
+  const pre = groupToggle('PreToolUse')
+  // Bikube's and the user's.
+  await expect(pre).toHaveText('PreToolUse 2')
+  await expect(pre).toHaveAttribute('aria-expanded', 'true')
+  await expect(groupToggle('SessionStart')).toHaveText('SessionStart 2')
+  const preRows = await groupBody('PreToolUse')
+  await expect(preRows.getByTestId('agent-setup-row')).toHaveCount(2)
+  await expect(preRows).toBeVisible()
+
+  await pre.click()
+  await expect(pre).toHaveAttribute('aria-expanded', 'false')
+  await expect(preRows).toBeHidden()
+  // The others stay open.
+  await expect(await groupBody('SessionStart')).toBeVisible()
+
+  // Enter on a focused heading too.
+  const stop = groupToggle('Stop')
+  await stop.focus()
+  await page.keyboard.press('Enter')
+  await expect(stop).toHaveAttribute('aria-expanded', 'false')
+  await page.keyboard.press('Enter')
+  await expect(stop).toHaveAttribute('aria-expanded', 'true')
+
+  // Kept after Refresh, a switch to Config and back, and Back to the board and reopening.
+  await page.getByTestId('agent-setup-refresh').click()
+  await expect(pre).toHaveAttribute('aria-expanded', 'false')
+  await tab('Config').click()
+  await tab('Hooks').click()
+  await expect(pre).toHaveAttribute('aria-expanded', 'false')
+  await expect(await groupBody('PreToolUse')).toBeHidden()
+  await page.getByTestId('titlebar-workspace').click()
+  await expect(board()).toBeVisible()
+  await setupButton().click()
+  await expect(tab('Hooks')).toHaveAttribute('aria-selected', 'true')
+  await expect(pre).toHaveAttribute('aria-expanded', 'false')
+  await expect(groupToggle('Stop')).toHaveAttribute('aria-expanded', 'true')
+
+  // Config's Preferences, Permissions' Allow and Plugins' Marketplaces collapse the same way.
+  await tab('Config').click()
+  await expect(groupToggle('Settings')).toHaveText('Settings 2')
+  await expect(groupToggle('Preferences')).toHaveText('Preferences 1')
+  const preferences = await groupBody('Preferences')
+  await expect(preferences.getByTestId('agent-setup-preference')).toHaveCount(1)
+  await groupToggle('Preferences').click()
+  await expect(groupToggle('Preferences')).toHaveAttribute('aria-expanded', 'false')
+  await expect(preferences).toBeHidden()
+  await expect(await groupBody('Settings')).toBeVisible()
+
+  await tab('Permissions').click()
+  await expect(groupToggle('Allow')).toHaveText('Allow 1')
+  await expect(groupToggle('Ask')).toHaveText('Ask 0')
+  const allow = await groupBody('Allow')
+  await groupToggle('Allow').click()
+  await expect(groupToggle('Allow')).toHaveAttribute('aria-expanded', 'false')
+  await expect(allow).toBeHidden()
+
+  await tab('Plugins').click()
+  await expect(groupToggle('Installed')).toHaveText('Installed 2')
+  await expect(groupToggle('Marketplaces')).toHaveText('Marketplaces 1')
+  const markets = await groupBody('Marketplaces')
+  await groupToggle('Marketplaces').click()
+  await expect(groupToggle('Marketplaces')).toHaveAttribute('aria-expanded', 'false')
+  await expect(markets).toBeHidden()
+  await expect(await groupBody('Installed')).toBeVisible()
+})
+
+test("#71 AC11: the headings' counts follow the filter", async () => {
+  await openWith(groupFixtures)
+  await tab('Hooks').click()
+  await expect(panel().getByTestId('agent-setup-group-toggle')).toHaveCount(5)
+  await chip('user').click()
+  // Only the events with a User hook, each counting its User hooks.
+  await expect(panel().getByTestId('agent-setup-group-toggle')).toHaveText([
+    'PreToolUse 1',
+    'SessionStart 1'
+  ])
+  await tab('Config').click()
+  // cleanupPeriodDays from ~/.claude/settings.json; settings.local.json's verbose is Local.
+  await expect(groupToggle('Settings')).toHaveText('Settings 1')
+  await expect(groupToggle('Preferences')).toHaveText('Preferences 1')
+})
+
+test("#71 AC12: each workspace's page keeps its own collapsed groups for the run, none after a restart", async () => {
+  await launch()
+  const a = await createWorkspace('A')
+  groupFixtures(a)
+  await setupButton().click()
+  await tab('Hooks').click()
+  await chip('user').click()
+  await groupToggle('PreToolUse').click()
+  await expect(groupToggle('PreToolUse')).toHaveAttribute('aria-expanded', 'false')
+
+  const b = await createWorkspace('B')
+  groupFixtures(b)
+  await setupButton().click()
+  await tab('Hooks').click()
+  await expect(chip('all')).toHaveAttribute('aria-pressed', 'true')
+  await expect(groupToggle('PreToolUse')).toHaveText('PreToolUse 2')
+  const toggles = (): Locator => panel().getByTestId('agent-setup-group-toggle')
+  await expect(toggles()).toHaveCount(5)
+  for (const toggle of await toggles().all()) {
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  }
+
+  await setupRow('A').click()
+  await expect(tab('Hooks')).toHaveAttribute('aria-selected', 'true')
+  await expect(chip('user')).toHaveAttribute('aria-pressed', 'true')
+  await expect(groupToggle('PreToolUse')).toHaveAttribute('aria-expanded', 'false')
+  await expect(groupToggle('SessionStart')).toHaveAttribute('aria-expanded', 'true')
+
+  await app!.close()
+  await launch()
+  await workspaceItem('A').click()
+  await setupButton().click()
+  await tab('Hooks').click()
+  await expect(chip('all')).toHaveAttribute('aria-pressed', 'true')
+  await expect(toggles()).toHaveCount(5)
+  for (const toggle of await toggles().all()) {
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  }
+})
+
+test("#71 AC13: at 320 px the chips wrap with no sideways scroll; the pressed chip takes the theme's accent", async () => {
+  writeFileSync(
+    join(dataDir, 'bikube-settings.json'),
+    '{"version":1,"settings":{"theme":"dark","fontSize":13,"fontFamily":"Menlo, Consolas, monospace","shell":"","terminalThemeDark":"Bikube Dark","terminalThemeLight":"Bikube Light","useGhosttyTheme":false}}'
+  )
+  await openWith(filterFixtures)
+  await page.emulateMedia({ colorScheme: null })
+  await tab('Skills').click()
+  await chip('user').click()
+  /** The pressed chip's colours, and the theme's accent and accent text resolved in the page. */
+  const colours = (): Promise<{ bg: string; fg: string; accent: string; accentText: string }> =>
+    page.evaluate(() => {
+      const resolve = (token: string): string => {
+        const probe = document.createElement('div')
+        probe.style.background = `var(${token})`
+        document.body.append(probe)
+        const colour = getComputedStyle(probe).backgroundColor
+        probe.remove()
+        return colour
+      }
+      const pressed = document.querySelector('.agent-setup-filter [aria-pressed="true"]')!
+      return {
+        bg: getComputedStyle(pressed).backgroundColor,
+        fg: getComputedStyle(pressed).color,
+        accent: resolve('--accent'),
+        accentText: resolve('--accent-text')
+      }
+    })
+  const expectAccent = async (): Promise<void> => {
+    await expect
+      .poll(async () => {
+        const c = await colours()
+        return c.bg === c.accent && c.fg === c.accentText
+      })
+      .toBe(true)
+  }
+  await expectAccent()
+  const settings = page.getByTestId('settings-dialog')
+  await page.keyboard.press(darwin ? 'Meta+Comma' : 'Control+Comma')
+  await settings.getByRole('radio', { name: 'Light' }).check()
+  await page.keyboard.press('Escape')
+  await expect(settings).toHaveCount(0)
+  await expectAccent()
+  await pickAppTheme(page, 'Nord')
+  await expectAccent()
+
+  await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(320, 700))
+  await page.getByTestId('sidebar-toggle').click()
+  await expect(page.getByTestId('agent-setup-sections')).toHaveAttribute(
+    'aria-orientation',
+    'horizontal'
+  )
+  await expect(chips()).toHaveCount(4)
+  // Wrapped: the last chip on a line below the first.
+  await expect
+    .poll(async () => {
+      const first = (await chips().first().boundingBox())!
+      const last = (await chips().last().boundingBox())!
+      return last.y > first.y
+    })
+    .toBe(true)
+  await expect.poll(() => chipRow().evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
+  await expect.poll(() => panel().evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
+  await expect
+    .poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+    .toBe(true)
 })

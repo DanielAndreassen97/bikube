@@ -155,3 +155,14 @@ describe('sandboxView', () => {
     expect(view.lists).toHaveLength(7)
   })
 })
+
+describe('the source filter on Sandbox (#71 D2)', () => {
+  it("keeps only the filtered source's entries and every fact", () => {
+    const view = sandboxView(ac3, '', { kind: 'project' })
+    expect(sandboxEntries(view).map((e) => e.entry)).toEqual(['registry.npmjs.org'])
+    expect(view.facts.find((f) => f.key === 'enabled')?.text).toBe('false')
+    expect(view.facts.find((f) => f.key === 'failIfUnavailable')?.text).toBe('true')
+    expect(sandboxEntries(sandboxView(ac3, 'github', { kind: 'project' }))).toEqual([])
+    expect(sandboxEntries(sandboxView(ac3, '', { kind: 'plugins' }))).toEqual([])
+  })
+})
