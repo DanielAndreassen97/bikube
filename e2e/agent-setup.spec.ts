@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pickAppTheme } from './app-theme'
 import { SHORTCUTS, backToBoard, boardCard, expectCardOpen } from './card-view'
+import { installedOutsideHome, openedPaths, recordOpenPath } from './editors'
 import { launchApp, newDataDir, removeDataDirs } from './launch'
 import { plainCards } from './plain-cards'
 
@@ -964,6 +965,41 @@ async function recordRevealed(): Promise<void> {
 
 const revealedPaths = (): Promise<string[]> =>
   app!.evaluate(() => [...((globalThis as { revealedPaths?: string[] }).revealedPaths ?? [])])
+
+test("#70 AC1: a skill's Open file runs VS Code's bundle CLI when no code is on the login PATH", async () => {
+  // A real VS Code at a system path would come first; CI has none.
+  test.skip(installedOutsideHome('vscode'), 'a real VS Code is installed here')
+  const shell = loginShell(false)
+  const cli = darwin
+    ? join(home, 'Applications/Visual Studio Code.app/Contents/Resources/app/bin/code')
+    : join(home, '.local/share/flatpak/exports/bin/com.visualstudio.code')
+  mkdirSync(dirname(cli), { recursive: true })
+  writeFileSync(cli, `#!/bin/sh\n{ echo "run bundle"; printf '%s\\n' "$@"; } >> '${editorLog()}'\n`)
+  chmodSync(cli, 0o755)
+  const folder = await openWith(ac4Fixtures, shell)
+  const skill = join(folder, '.claude', 'skills', 'review', 'SKILL.md')
+  await tab('Skills').click()
+  await row('review').hover()
+  await row('review').getByRole('button', { name: 'Open file' }).click()
+  await expect.poll(editorRuns).toEqual(['run bundle', folder, skill])
+  await page.waitForTimeout(500)
+  await expect(panel().getByTestId('agent-setup-open-error')).toHaveCount(0)
+})
+
+test("#70 AC4: a skill's Open file with VS Code found nowhere opens it with the default app, with a note", async () => {
+  test.skip(installedOutsideHome('vscode'), 'a real VS Code is installed here')
+  const folder = await openWith(ac4Fixtures, loginShell(false))
+  await recordOpenPath(app!)
+  const skill = join(folder, '.claude', 'skills', 'review', 'SKILL.md')
+  await tab('Skills').click()
+  await row('review').hover()
+  await row('review').getByRole('button', { name: 'Open file' }).click()
+  const note = panel().getByTestId('agent-setup-open-error')
+  await expect(note).toHaveText('Opened SKILL.md with the default app: code not found')
+  await expect(note).toHaveAttribute('role', 'status')
+  expect(await openedPaths(app!)).toEqual([skill])
+  expect(editorRuns()).toEqual([])
+})
 
 test("AC17: a skill's Open file runs code with the workspace and SKILL.md, Reveal shows it; unlisted paths open nothing", async () => {
   const shell = loginShell(false)
