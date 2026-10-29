@@ -128,6 +128,36 @@ function visible(output: string): string {
   )
 }
 
+/**
+ * A fake `claude` in `home`/bin printing its arguments, and Bikube's settings file: the shell's
+ * `claude` adds `--settings` with it, wherever the profile puts PATH, and leaves a run naming its
+ * own alone. `path` sets PATH in the shell's syntax.
+ */
+async function checkClaude(
+  home: string,
+  startShell: (env: Record<string, string>) => Shell,
+  path: (bin: string) => string
+): Promise<void> {
+  const bin = join(home, 'fake-bin')
+  mkdirSync(bin, { recursive: true })
+  writeFileSync(join(bin, 'claude'), '#!/bin/sh\necho "claude-args:$*"\n', { mode: 0o755 })
+  const settings = join(home, 'bikube-claude-settings.json')
+  writeFileSync(settings, '{}\n')
+  const sh = startShell({ BIKUBE_CLAUDE_SETTINGS: settings })
+  // Typed at the first prompt, not before it: anything asked before it would take the first key.
+  await sh.until('the first prompt', (o) => o.includes(OSC('133;B')))
+  sh.run(path(bin))
+  await sh.until('the PATH set', (o) => o.split(OSC('133;B')).length > 2)
+  sh.run('claude -p hi')
+  await sh.until('claude with the settings', (o) =>
+    visible(o).includes(`claude-args:--settings ${settings} -p hi`)
+  )
+  sh.run('claude --settings mine.json -c')
+  await sh.until('claude with its own settings', (o) =>
+    visible(o).includes('claude-args:--settings mine.json -c\n')
+  )
+}
+
 /** The OSC 133 and OSC 7 marks in `output`, in order. */
 function marks(output: string): string[] {
   // eslint-disable-next-line no-control-regex
@@ -291,6 +321,36 @@ describeShell('bash', (bash) => {
       sh.run('echo "lc=[${LC_ALL-unset}]"')
       await sh.until('LC_ALL', (o) => visible(o).includes(`\nlc=[${lcAll ?? 'unset'}]\n`))
     }
+  })
+
+  it("gives claude Bikube's settings, and leaves a run naming its own alone", async () => {
+    const home = folder()
+    await checkClaude(
+      home,
+      (env) => start(bash, home, env),
+      (bin) => `PATH=${bin}:$PATH`
+    )
+  })
+
+  it("keeps the integration and adds the settings under the user's `alias claude`", async () => {
+    const home = folder()
+    const bin = join(home, 'fake-bin')
+    mkdirSync(bin, { recursive: true })
+    writeFileSync(join(bin, 'claude'), '#!/bin/sh\necho "claude-args:$*"\n', { mode: 0o755 })
+    const settings = join(home, 'bikube-claude-settings.json')
+    writeFileSync(settings, '{}\n')
+    writeFileSync(
+      join(home, '.bash_profile'),
+      [`PATH=${bin}:$PATH`, "alias claude='claude --from-alias'", "PS1='user[$?]> '"].join('\n') +
+        '\n'
+    )
+    const sh = start(bash, home, { BIKUBE_CLAUDE_SETTINGS: settings })
+    sh.run('claude -p hi')
+    await sh.until('claude through the alias with the settings', (o) =>
+      visible(o).includes(`claude-args:--settings ${settings} --from-alias -p hi`)
+    )
+    expect(visible(sh.output())).not.toMatch(/syntax error/)
+    expect(marks(sh.output())).toContain('133;A')
   })
 
   it("works under the login files' `set -u` without an error", async () => {
@@ -539,6 +599,16 @@ describeShell('zsh', (zsh) => {
     expect(out.indexOf(OSC('133;B'))).toBeGreaterThan(out.indexOf(OSC('133;A')))
   })
 
+  it("gives claude Bikube's settings, and leaves a run naming its own alone", async () => {
+    // Away from the system's rc files, whose compinit asks a question on CI's runner.
+    const home = zshHome()
+    await checkClaude(
+      home,
+      (env) => start(zsh, home, env),
+      (bin) => `PATH=${bin}:$PATH`
+    )
+  })
+
   it("works under the user's `setopt nounset` without an error", async () => {
     const home = zshHome()
     userFiles(home)
@@ -572,6 +642,16 @@ describeShell('fish', (fish) => {
     await checkScripts(sh, (status) => `user[${status}]> `)
     expect(visible(sh.output())).toContain('hook-saw-1\n')
     await nestedEnv(sh, fish)
+  })
+
+  it("gives claude Bikube's settings, and leaves a run naming its own alone", async () => {
+    const home = folder()
+    userConfig(home)
+    await checkClaude(
+      home,
+      (env) => start(fish, home, env),
+      (bin) => `set -gx PATH ${bin} $PATH`
+    )
   })
 
   it('gives back an XDG_DATA_DIRS that was set', async () => {

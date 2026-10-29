@@ -24,6 +24,9 @@ import {
   cleanCardTitle,
   TITLE_REQUIRED,
   findCallingWorkspace,
+  callingTerminal,
+  CALLING_CARD,
+  SHELL_NOT_A_CARD,
   noSetupError,
   notRunningError,
   resolveCard,
@@ -55,7 +58,7 @@ export async function checkCreateWorktree(
   if (command.command !== 'create' || !command.worktree) return unchanged
   const calling = findCallingWorkspace(state, callingCardId)
   if (!calling.ok) return unchanged
-  if (calling.value.cards.find((c) => c.id === callingCardId)?.host !== undefined) return unchanged
+  if (callingTerminal(calling.value, callingCardId).card.host !== undefined) return unchanged
   const title = cleanCardTitle(command.title)
   if (!title) return unchanged
   const target =
@@ -76,6 +79,30 @@ export async function checkCreateWorktree(
     return { ok: false, error: `board: a branch named '${branch}' already exists` }
   }
   return { ok: true, command: { ...command, branch } }
+}
+
+/** `command` naming `.` from a workspace shell (see `answerBoardCommand`). */
+function answerShell(
+  shellId: string,
+  command: BoardCommand,
+  isRunning: (cardId: string) => boolean,
+  setAgentStatus: (cardId: string, text: string) => void,
+  setActivity: (cardId: string, activity: Activity | null) => void
+): BoardReply {
+  if (command.command === 'status' || command.command === 'activity') {
+    if (!isRunning(shellId)) return { ok: false, error: SHELL_NOT_A_CARD }
+    if (command.command === 'status') setAgentStatus(shellId, cleanAgentStatus(command.text))
+    else setActivity(shellId, command.activity === 'none' ? null : command.activity)
+    return { ok: true }
+  }
+  if (
+    command.command === 'description' ||
+    command.command === 'session' ||
+    command.command === 'usage'
+  ) {
+    return { ok: true }
+  }
+  return { ok: false, error: SHELL_NOT_A_CARD }
 }
 
 /**
@@ -120,7 +147,8 @@ export function answerBoardCommand(
   const workspace = findCallingWorkspace(state, callingCardId)
   if (!workspace.ok) return workspace
   const calling = workspace.value
-  const callingCard = calling.cards.find((c) => c.id === callingCardId) as Card
+  // A workspace shell may call too: it lists, creates and acts on named cards, never on `.`.
+  const { card: callingCard, shell } = callingTerminal(calling, callingCardId)
   // An SSH card's session socket serves only its own card's workspace (#69 D9).
   const remote = callingCard.host !== undefined
   if (remote && !servesRemoteCard(command)) return { ok: false, error: INVALID_REQUEST }
@@ -174,6 +202,11 @@ export function answerBoardCommand(
     if (!created.ok) return { ok: false, error: `board: ${created.error.message}` }
     return { ok: true, output: `${created.value.id} ${titles.name}\n` }
   }
+  // A shell is a terminal like a card's (Claude Code typed in it gets Bikube's hooks): its
+  // status and activity show for it, runtime only; it has no description, session or usage to
+  // keep, so those do nothing, and it can't be moved, renamed, described or set up.
+  if (shell && command.card === CALLING_CARD)
+    return answerShell(callingCardId, command, isRunning, setAgentStatus, setActivity)
   // A card's id names it in any workspace for a local card (#69 D7); `activity`, `session`,
   // `setup` and `usage` stay in the calling workspace, as an SSH card's commands do (D9).
   const placed =
