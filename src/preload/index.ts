@@ -143,6 +143,12 @@ const api: BikubeApi = {
     reveal: (folder, path) => ipcRenderer.invoke(IPC.agentSetupReveal, folder, path),
     stats: (folder, extra) => ipcRenderer.invoke(IPC.agentSetupStats, folder, extra)
   },
+  agentTab: {
+    summary: (folder, sessionId, since) =>
+      ipcRenderer.invoke(IPC.agentTabSummary, folder, sessionId, since),
+    sessionSummary: (sessionId, since) =>
+      ipcRenderer.invoke(IPC.agentTabSessionSummary, sessionId, since)
+  },
   update: {
     state: () => ipcRenderer.invoke(IPC.updateState),
     onState: (listener) => {
